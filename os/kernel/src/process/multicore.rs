@@ -142,7 +142,7 @@ impl Scheduler {
                 }
             }
             // If the thread is locally blocked, requeue it.
-            MessageCmd::Deblock { pid, tid } => {
+            MessageCmd::Unblock { pid, tid } => {
                 let mut blocked_list = self.blocked_list.lock();
                 if scheduler::is_thread_alive(tid) == false { return; }
 
@@ -218,7 +218,7 @@ pub enum MessageCmd {
     JoinTargetExited { tid: usize },
 
     /// "If you have this thread in your local blocked list, wake it."
-    Deblock { pid: Uuid, tid: usize },
+    Unblock { pid: Uuid, tid: usize },
 
     /// "If you have this thread, kill it."
     Kill { tid: usize },

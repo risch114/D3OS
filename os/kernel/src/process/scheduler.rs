@@ -207,7 +207,7 @@ impl Scheduler {
             .find(|thread| thread.id() == thread_id)
             .cloned();
         if found.is_some() { return found; }
-        
+
         // check blocked list
         self.blocked_list.lock()
             .iter()
@@ -778,18 +778,6 @@ impl Scheduler {
         }
     }
 
-    /// Requeue thread with `tid` from process with `pid` to the ready queue of the scheduler
-    pub fn deblock(&self, pid: Uuid, tid: usize) {
-        let mut block_list = self.blocked_list.lock();
-
-        if let Some(pos) = block_list.iter().position(|thread| thread.id() == tid && thread.process().id() == pid) {
-            let thread = block_list.remove(pos);
-            self.ready(thread);
-        } else {
-            multicore::schedule_on_all_others(MessageItem::Cmd(MessageCmd::Deblock {pid, tid}))
-        }
-    }
-
     /// Unblock thread with given (pid, tid). \
     /// Returns true if thread was found and unblocked, false otherwise.
     pub fn unblock(&self, pid: Uuid, tid: usize) -> bool {
@@ -811,6 +799,7 @@ impl Scheduler {
         // If we found a blocked thread in the block_list, wake it up
         if let Some(thread) = blocked_thread {
             // let mut state = self.get_ready_state();
+            // self.ready(&thread);
             thread.set_state(ThreadState::Ready);
             state.ready_queue.push_front(Arc::clone(&thread));
             multicore::inc_rq_len();
@@ -839,7 +828,7 @@ impl Scheduler {
         // avoid waking stale (exited) waiters.
         if is_thread_alive(tid) {
             drop(state); // release ready_state before cross-core scheduling
-            multicore::schedule_on_all_others(MessageItem::Cmd(MessageCmd::Deblock { pid, tid }));
+            multicore::schedule_on_all_others(MessageItem::Cmd(MessageCmd::Unblock { pid, tid }));
             return true;
         }
 
