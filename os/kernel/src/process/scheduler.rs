@@ -185,9 +185,31 @@ impl Scheduler {
         self.current_thread.get_cloned().take()
     }
 
-    /// Return reference to thread identified by `thread_id`
+    /// Return reference to thread identified by `thread_id` \
+    /// Only finds threads on the current core
     pub fn thread(&self, thread_id: usize) -> Option<Arc<Thread>> {
-        self.ready_state.lock().ready_queue
+
+        // check current thread
+        let current = self.current_thread();
+        if current.id() == thread_id { return Some(current); }
+
+        // check ready_queue
+        let found = self.ready_state.lock().ready_queue
+            .iter()
+            .find(|thread| thread.id() == thread_id)
+            .cloned();
+        if found.is_some() { return found; }
+
+        // check sleep list
+        let found = self.sleep_list.lock()
+            .iter()
+            .map(|(thread, _ms)| thread)
+            .find(|thread| thread.id() == thread_id)
+            .cloned();
+        if found.is_some() { return found; }
+        
+        // check blocked list
+        self.blocked_list.lock()
             .iter()
             .find(|thread| thread.id() == thread_id)
             .cloned()
