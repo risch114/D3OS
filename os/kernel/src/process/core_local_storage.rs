@@ -17,7 +17,8 @@ use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable};
 use x86_64::structures::tss::TaskStateSegment;
 use x86_64::VirtAddr;
 use crate::device::apic::Apic;
-use crate::process::scheduler::{per_cpu_apic_id, set_inbox_apic_id, Scheduler, MessageItem};
+use crate::process::scheduler::Scheduler;
+use crate::process::multicore::{per_cpu_apic_id, set_inbox_apic_id, MessageItem};
 use crate::take_inbox_receiver;
 
 /// Core Local Storage

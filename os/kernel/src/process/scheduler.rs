@@ -1,10 +1,10 @@
 /* ╔═════════════════════════════════════════════════════════════════════════╗
-   ║ Module: scheduler                                                       ║
-   ╟─────────────────────────────────────────────────────────────────────────╢
-   ║ Implementation of a basic round-robin scheduler.                        ║
-   ║                                                                         ║
-   ║ Public functions                                                        ║
-   ║   - active_thread_ids      get a list of all active thread IDs          ║
+║ Module: scheduler                                                       ║
+╟─────────────────────────────────────────────────────────────────────────╢
+║ Implementation of a basic round-robin scheduler.                        ║
+║                                                                         ║
+║ Public functions                                                        ║
+║   - active_thread_ids      get a list of all active thread IDs          ║
    ║   - current_thread         get the currently running thread             ║
    ║   - current_ids            get the (pid, tid) of the current thread     ║
    ║   - exit                   exit the calling thread                      ║
@@ -25,6 +25,8 @@
    ╚═════════════════════════════════════════════════════════════════════════╝
 */
 use crate::process::thread::{Thread, ThreadState};
+use crate::process::multicore;
+use crate::process::multicore::{MessageCmd, MessageItem};
 use crate::{allocator, apic, per_cpu_ref, timer, tss};
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -38,20 +40,18 @@ use core::{panic, ptr};
 use core::arch::asm;
 use core::cell::Cell;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::Ordering::{Relaxed};
-use log::{debug, info};
+use log::info;
 use smallmap::Map;
 use spin::{Mutex, MutexGuard, Once};
-use thingbuf::mpsc::{Sender};
-use crate::device::apic::get_apic_id;
 use crate::device::cpu::{disable_int_nested, enable_int_nested};
-use crate::process::core_local_storage::{cls, current_core_id, scheduler, tss_static};
+use crate::process::core_local_storage::{current_core_id, scheduler, tss_static};
 
 // thread IDs
 pub static THREAD_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
-static ACTIVE_CPUS: AtomicU32 = AtomicU32::new(1);  //BP automatically
+pub(super) static ACTIVE_CPUS: AtomicU32 = AtomicU32::new(1);  //BP automatically
 
 /// Global set of "alive" thread IDs (across all cores).
 /// Presence means: joining on this tid should block (unless it exits concurrently).
@@ -96,10 +96,10 @@ pub fn cpu_count() -> u32 {
 
 /// Everything related to the threads in ready state in the scheduler
 pub struct ReadyState {
-    initialized: bool,
-    last_fpu_thread: Option<Arc<Thread>>,
-    ready_queue: VecDeque<Arc<Thread>>,
-    idle_thread: Arc<Thread>
+    pub(super) initialized: bool,
+    pub(super) last_fpu_thread: Option<Arc<Thread>>,
+    pub(super) ready_queue: VecDeque<Arc<Thread>>,
+    pub(super) idle_thread: Arc<Thread>
 }
 
 impl ReadyState {
@@ -120,12 +120,12 @@ impl ReadyState {
 
 /// Main struct of the scheduler
 pub struct Scheduler {
-    current_thread: Cell<Option<Arc<Thread>>>,
-    ready_state: Mutex<ReadyState>,
-    sleep_list: Mutex<Vec<(Arc<Thread>, usize)>>,
-    blocked_list: Mutex<Vec<Arc<Thread>>>,
-    join_map: Mutex<Map<usize, Vec<Arc<Thread>>>>, // manage which threads are waiting for a thread-id to terminate
-    has_started: bool,
+    pub(super) current_thread: Cell<Option<Arc<Thread>>>,
+    pub(super) ready_state: Mutex<ReadyState>,
+    pub(super) sleep_list: Mutex<Vec<(Arc<Thread>, usize)>>,
+    pub(super) blocked_list: Mutex<Vec<Arc<Thread>>>,
+    pub(super) join_map: Mutex<Map<usize, Vec<Arc<Thread>>>>, // manage which threads are waiting for a thread-id to terminate
+    pub(super) has_started: bool,
 }
 
 unsafe impl Send for Scheduler {}
@@ -268,7 +268,7 @@ impl Scheduler {
             self.switch_thread_no_interrupt();
         };
 
-        inc_rq_len();
+        multicore::inc_rq_len();
         state.ready_queue.push_front(thread);
 
         // Don't override value if key present
@@ -298,7 +298,7 @@ impl Scheduler {
                 sleep_list.push((thread, wakeup_time));
             }
 
-            dec_rq_len();
+            multicore::dec_rq_len();
             self.block_and_switch(state);
         }
     }
@@ -322,7 +322,7 @@ impl Scheduler {
                 block_list.push(thread);
             } // drop lock for block_list
             //info!("Scheduler::block: switch to next thread");
-            dec_rq_len();
+            multicore::dec_rq_len();
             self.block_and_switch(state);
         }
     }
@@ -335,7 +335,7 @@ impl Scheduler {
             let thread = block_list.remove(pos);
             self.ready(thread);
         } else {
-            schedule_on_all_others(MessageItem::Cmd(MessageCmd::Deblock {pid, tid}))
+            multicore::schedule_on_all_others(MessageItem::Cmd(MessageCmd::Deblock {pid, tid}))
         }
     }
 
@@ -373,7 +373,7 @@ impl Scheduler {
             }
         }
 
-        dec_rq_len();
+        multicore::dec_rq_len();
         self.block_and_switch(state);
         Ok(0)
     }
@@ -385,10 +385,10 @@ impl Scheduler {
             for thread in join_list {
                 thread.set_state(ThreadState::Running);
                 ready_state.ready_queue.push_front(Arc::clone(thread));
-                inc_rq_len();
+                multicore::inc_rq_len();
             }
         }
-        schedule_on_all_others(MessageItem::Cmd(MessageCmd::JoinTargetExited {tid: thread_id}));
+        multicore::schedule_on_all_others(MessageItem::Cmd(MessageCmd::JoinTargetExited {tid: thread_id}));
         join_map.remove(&thread_id);
     }
 
@@ -402,7 +402,7 @@ impl Scheduler {
         mark_thread_dead(current.id());
         self.unjoin(current.id(), &mut ready_state);
 
-        dec_rq_len();
+        multicore::dec_rq_len();
         drop(current); // Decrease Rc manually, because block() does not return
         self.block_and_switch(ready_state);
         unreachable!()
@@ -418,14 +418,14 @@ impl Scheduler {
         }
 
         if self.kill_locally(thread_id, &mut self.get_ready_state()) == false {
-            schedule_on_all_others(MessageItem::Cmd(MessageCmd::Kill {tid: thread_id}))
+            multicore::schedule_on_all_others(MessageItem::Cmd(MessageCmd::Kill {tid: thread_id}))
         }
     }
 
     /// Kill the thread with the id `thread_id`, if it is on the same Core
     /// goes through ready_queue, sleep_list, blocked_list, and join_map in this order
     /// returns true if a thread with the given id was found
-    fn kill_locally(&self, thread_id: usize, state: &mut ReadyState) -> bool {
+    pub(super) fn kill_locally(&self, thread_id: usize, state: &mut ReadyState) -> bool {
         if is_thread_alive(thread_id) == false { return true; }
         let mut changed = false;
 
@@ -471,7 +471,7 @@ impl Scheduler {
         if changed {
             mark_thread_dead(thread_id);
             self.unjoin(thread_id, state);
-            dec_rq_len();
+            multicore::dec_rq_len();
         }
         changed
     }
@@ -484,7 +484,7 @@ impl Scheduler {
         let nested = disable_int_nested();
         let id = current_core_id();
         let nbr_threads = self.active_thread_count() as u32;
-        let own_threads = read_rq_len() as u32;
+        let own_threads = multicore::read_rq_len() as u32;
         let nbr_cpus = ACTIVE_CPUS.load(Relaxed);
         info!("Scheduler {}: Current thread: {}", id, self.current_thread().id());
         info!("Scheduler{}: total_threads: {}, own_threads: {}, cpus: {}",
@@ -498,7 +498,7 @@ impl Scheduler {
             info!("  - {}, {}", thread.0.id(), thread.1);
         }
         for i in 0..nbr_cpus {
-            info!("Cpu {} has {} active threads running", i, read_rq_len_remote(i as usize));
+            info!("Cpu {} has {} active threads running", i, multicore::read_rq_len_remote(i as usize));
         }
         enable_int_nested(nested);
     }
@@ -532,7 +532,7 @@ impl Scheduler {
             // Execute in own if-block, so that the lock is released automatically (block() does not return)
             let mut sleep_list = self.sleep_list.lock();
             Scheduler::check_sleep_list(&mut state, &mut sleep_list);
-            drain_inbox_into_ready(10, &mut state);
+            multicore::drain_inbox_into_ready(10, &mut state);
             next_thread = state.ready_queue.pop_back();
             if next_thread.is_none() {  //still no new thread => switch to idle
                 next_thread = Some(Arc::clone(&state.idle_thread));
@@ -601,7 +601,7 @@ impl Scheduler {
             let mut block_list = self.blocked_list.lock();
             block_list.push(Arc::clone(&thread));
         }
-        dec_rq_len();
+        multicore::dec_rq_len();
         self.block_and_switch(state);
     }
 
@@ -628,7 +628,7 @@ impl Scheduler {
             // let mut state = self.get_ready_state();
             thread.set_state(ThreadState::Ready);
             state.ready_queue.push_front(Arc::clone(&thread));
-            inc_rq_len();
+            multicore::inc_rq_len();
             return true;
         }
 
@@ -650,11 +650,11 @@ impl Scheduler {
         // 3) Not found on this core. The thread may be blocked on the
         // `blocked_list` of another core (the scheduler is core-local), so ask
         // every other core to deblock it. The owning core's `Deblock` handler
-        // does the matching `inc_rq_len()`. Only broadcast for live threads to
+        // does the matching `multicore::inc_rq_len()`. Only broadcast for live threads to
         // avoid waking stale (exited) waiters.
         if is_thread_alive(tid) {
             drop(state); // release ready_state before cross-core scheduling
-            schedule_on_all_others(MessageItem::Cmd(MessageCmd::Deblock { pid, tid }));
+            multicore::schedule_on_all_others(MessageItem::Cmd(MessageCmd::Deblock { pid, tid }));
             return true;
         }
 
@@ -674,10 +674,10 @@ impl Scheduler {
             if let Some(mut sleep_list) = self.sleep_list.try_lock() {
                 Scheduler::check_sleep_list(&mut state, &mut sleep_list);
             }
-            drain_inbox_into_ready(10, &mut state);
+            multicore::drain_inbox_into_ready(10, &mut state);
 
             // Check if this core has too many threads running
-            if read_resched_flag() || self.should_balance_now() {
+            if multicore::read_resched_flag() || self.should_balance_now() {
                 self.balance_once(&mut state);
             }
 
@@ -753,112 +753,6 @@ impl Scheduler {
         state.last_fpu_thread = Some(current);
     }
 
-    /// Checks whether the current core should balance its threads.
-    /// returns own_threads > (nbr_threads /nbr_cpus +1)
-    fn should_balance_now(&self) -> bool {
-        let nbr_threads = self.active_thread_count() as u32;
-        let own_threads = read_rq_len() as u32;
-        let nbr_cpus = ACTIVE_CPUS.load(Relaxed);
-        if own_threads > (nbr_threads /nbr_cpus +1){
-            /*debug!("Scheduler{}: total_threads: {}, own_threads: {}, cpus: {}",
-                current_core_id(), nbr_threads, own_threads, nbr_cpus);*/
-            return true }
-        false
-    }
-
-    /// Balances the threads on the current core by moving one thread from the tail to the target core.
-    /// Target core is the core with the least number of threads.
-    /// Returns the new state of the scheduler. (needed for mutable access)
-    fn balance_once(&self, state: &mut ReadyState) {
-        let own_load = read_rq_len() as usize;
-        if own_load <= 1 {
-            //debug!("Scheduler: Cannot balance, current load ({:?}) is too low!", own_load);
-            return;
-        }
-
-        if let Some((target_core, target_load)) = self.find_less_loaded_core() {
-            if own_load >= target_load + 2 {
-                let amount = ((own_load-target_load)/4)+1;
-                for _ in 0..amount {
-                    // Move one thread from the tail to the target
-                    let thread_opt = state.ready_queue.pop_front();
-                    if let Some(thread) = thread_opt {
-                        // If we can't migrate this thread, skip it.
-                        // This makes us migrate one less thread than we wanted,
-                        // but this should be okay in general.
-                        if !thread.can_migrate() {
-                            info!("cannot migrate {thread:?}, skipping");
-                            state.ready_queue.push_back(thread);
-                            continue;
-                        }
-
-                        // Check if the migrating thread is the last thread on this core that has used the FPU.
-                        // If so, we need to reset `last_fpu_thread` to None.
-                        // We do not need to store the FPU context of the migrating thread,
-                        // as we always take a thread from the ready queue and never the current thread.
-                        if state.last_fpu_thread.is_some() {
-                            if state.last_fpu_thread.as_ref().unwrap().id() == thread.id() {
-                                state.last_fpu_thread = None;
-                            }
-                        }
-                        let _tid = thread.id();
-                        let w = MessageItem::new_thread(thread);
-                        dec_rq_len();
-                        if let Ok(_r) = schedule_on(target_core, w) {
-                            debug!(" Scheduler{}: Scheduled thread {} on core {}", current_core_id(), _tid, target_core);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Finds the core with the least number of threads.
-    /// returns (target_core, target_load)
-    fn find_less_loaded_core(&self) -> Option<(usize, usize)> {
-        // Inspect per-core exported metrics
-        let mut curr: usize = 0;
-        let mut min = read_rq_len_remote(0);
-        for i in 1..ACTIVE_CPUS.load(Relaxed) as usize {
-            if min > read_rq_len_remote(i) {
-                min = read_rq_len_remote(i);
-                curr = i;
-            }
-        }
-        let own = read_rq_len();
-        if min >= own { return None; }
-        Some((curr, min as usize))
-    }
-
-    /// Finds the core with the most number of threads.
-    /// returns the target's Core Id
-    fn find_more_loaded_core(&self) -> Option<usize> {
-        // Inspect per-core exported metrics
-        let mut curr: usize = 0;
-        let mut max = read_rq_len_remote(0);
-        for i in 1..ACTIVE_CPUS.load(Relaxed) as usize {
-            if max < read_rq_len_remote(i) {
-                max = read_rq_len_remote(i);
-                curr = i;
-            };
-        }
-        let own = read_rq_len();
-        if max <= own || max < 2 { return None; }
-        Some(curr)
-    }
-
-    /// Forces a core with more than 2 threads to migrate one through a Reschedule IPI.
-    /// (Sends a reschedule IPI that will result in a migration within switch_thread())
-    pub fn look_for_overloaded_core(&self) {
-        let overloaded_core = self.find_more_loaded_core();
-        match overloaded_core {
-            None => return,
-            Some(target_id) => send_reschedule_ipi(target_id)
-        }
-    }
-
-    
-
     /// Check the sleep list for threads that need to be woken up
     fn check_sleep_list(state: &mut ReadyState, sleep_list: &mut Vec<(Arc<Thread>, usize)>) {
         let time = timer().systime_ms();
@@ -866,7 +760,7 @@ impl Scheduler {
         sleep_list.retain(|entry| {
             if time >= entry.1 {
                 state.ready_queue.push_front(Arc::clone(&entry.0));
-                inc_rq_len();
+                multicore::inc_rq_len();
                 false
             } else {
                 true
@@ -942,51 +836,6 @@ impl Scheduler {
         let len = copy_from_slice_sizechecked!(buffer, bytes);
         Ok(len)
     }
-
-    /// Handle a command received via inbox, using the already-held ready_state lock (`state`).
-    fn handle_inbox_cmd(&self, cmd: MessageCmd, state: &mut ReadyState) {
-        match cmd {
-            // Wake local join-waiters and add to readyQueue
-            MessageCmd::JoinTargetExited { tid } => {
-                let mut join_map = self.join_map.lock();
-
-                if let Some(join_list) = join_map.get_mut(&tid) {
-                    for waiter in join_list.drain(..) {
-                        waiter.set_state(ThreadState::Running);
-                        state.ready_queue.push_front(waiter);
-                        inc_rq_len();
-                    }
-                    join_map.remove(&tid);
-                }
-            }
-            // If the thread is locally blocked, requeue it.
-            MessageCmd::Deblock { pid, tid } => {
-                let mut blocked_list = self.blocked_list.lock();
-                if is_thread_alive(tid) == false { return; }
-
-                if let Some(pos) = blocked_list
-                    .iter().position(|t| t.id() == tid && t.process().id() == pid)
-                {
-                    let thread = blocked_list.remove(pos);
-                    thread.set_state(ThreadState::Running);
-                    state.ready_queue.push_front(thread);
-                    inc_rq_len();
-                }
-            }
-            // if you have this thread, kill it
-            MessageCmd::Kill { tid } => {
-                if is_thread_alive(tid) == false { return; }
-                let thread = self.current_thread();
-                if thread.id() == tid { //cant kill itself, reschedule for other thread
-                    let _ = schedule_on(current_core_id() as usize, MessageItem::Cmd(MessageCmd::Kill { tid }));
-                    let _ = schedule_on_all_others(MessageItem::Cmd(MessageCmd::Kill { tid }));    //if target migrates until then
-                    return;
-                }
-                self.kill_locally(tid, state);
-            }
-        }
-    }
-
     
     /// Voluntarily yield the CPU to another runnable thread.
     ///
@@ -1051,174 +900,6 @@ impl Scheduler {
     }
 }
 
-
-//// Multicore support  ////
-
-/// Helper struct to store shared public information of a core
-///     rq_len: approximate runqueue length (owner updates, others read)
-///     resched_flag: indicates whether another core requested a reschedule
-///     tx: sender for other cores to send messages to this one
-///     apic_id: stored at initialization, used to translate cpu_id to apic_id for IPI's
-#[repr(align(64))]
-pub struct PerCpuRef {
-    rq_len: AtomicU32,
-    resched_flag: AtomicBool,
-    tx: Sender<Option<MessageItem>>,    // producers (remote cores)
-    apic_id: AtomicU32,
-}
-unsafe impl Sync for PerCpuRef {}
-impl PerCpuRef { pub fn new(tx: Sender<Option<MessageItem>>) -> Self {
-    Self { rq_len: AtomicU32::new(0), resched_flag: AtomicBool::new(false),
-        tx, apic_id: AtomicU32::new(0) } } }
-
-
-/// Wrapper enum to store either a runnable thread or a small cross-core command.
-/// (Should be kept "small" since it lives in per-core inboxes and is drained in scheduler paths)
-#[derive(Clone)]
-pub enum MessageItem {
-    Thread(Arc<Thread>),
-    Cmd(MessageCmd),
-}
-
-impl MessageItem {
-    #[inline]
-    pub fn new_thread(thread: Arc<Thread>) -> Self {
-        MessageItem::Thread(thread)
-    }
-    #[inline]
-    pub fn new_cmd(cmd: MessageCmd) -> Self {
-        MessageItem::Cmd(cmd)
-    }
-}
-
-
-/// Commands that a core can request another core to perform locally
-#[derive(Clone)]
-pub enum MessageCmd {
-    /// "Thread with `tid` exited somewhere; if you have join-waiters for it locally, wake them."
-    JoinTargetExited { tid: usize },
-
-    /// "If you have this thread in your local blocked list, wake it."
-    Deblock { pid: Uuid, tid: usize },
-
-    /// "If you have this thread, kill it."
-    Kill { tid: usize },
-}
-
-/// Called only once by each owner core during startup to set the PER_CPU_SCHED apic_id
-pub fn set_inbox_apic_id(id: usize) {
-    let curr_id = id;
-    let apic_id = get_apic_id();
-    info!("Setting inbox{} apic_id to {}", curr_id, apic_id);
-    per_cpu_ref(curr_id).apic_id.store(apic_id, Ordering::Release);
-}
-
-/// Returns the apic_id of the core with the given id
-pub fn per_cpu_apic_id(cpu_id: usize) -> u32 {
-    per_cpu_ref(cpu_id).apic_id.load(Ordering::Acquire)
-}
-
-/// Returns a reference to the PerCpuSched struct of the current core
-#[inline]
-pub fn per_cpu_ref_curr() -> &'static PerCpuRef {
-    per_cpu_ref(current_core_id() as usize)
-}
-
-/// Returns a reference to the sender out of the PerCpuSched struct of the core with the given id
-#[inline]
-pub fn per_cpu_sender(id: usize) -> &'static Sender<Option<MessageItem>> {
-    &per_cpu_ref(id).tx
-}
-
-/// Schedules a thread (wrapped in a MessageItem) on a remote core with the target_id
-/// Sends a reschedule IPI to wake that core up, if it was idle.
-pub fn schedule_on(target_id: usize, item: MessageItem) -> Result<(), MessageItem> {
-    let pc = per_cpu_ref(target_id);
-    match pc.tx.try_send(Some(item)) {
-        Ok(()) => {
-            send_reschedule_ipi(target_id);
-            Ok(())
-        }
-        Err(e) => Err(e.into_inner().unwrap()), // unwrap: we sent Some(_)
-    }
-}
-
-/// Schedules a cmd (wrapped in a MessageItem) on ALL remote cores
-/// Does not send reschedule IPI's since only one core needs to actually do something
-pub fn schedule_on_all_others(item: MessageItem) {
-    let own_id = current_core_id() as usize;
-    for i in 0..ACTIVE_CPUS.load(Ordering::Acquire) as usize {
-        if i != own_id {
-            let pc = per_cpu_ref(i);
-            pc.tx.try_send(Some(item.clone())).expect("Failed to send message to remote core!");
-        }
-    }
-}
-
-/// drains the inbox from the cls into the ready queue; 10 items max per call
-/// automatically calls inc_rq_len()
-pub fn drain_inbox_into_ready(max: usize, state: &mut ReadyState) {
-    let mut drained_threads = 0usize;
-    for _ in 0..max {
-        match cls().try_recv() {
-            Ok(Some(item)) => match item {
-                MessageItem::Thread(thread) => {
-
-                    state.ready_queue.push_front(thread);
-                    inc_rq_len();
-                    drained_threads += 1;
-                }
-                MessageItem::Cmd(cmd) => {
-                    scheduler().handle_inbox_cmd(cmd, state);
-                }
-            },
-            Ok(None) => {
-                log::error!("cpu{}: inbox returned None (unexpected)", current_core_id());
-                break;
-            }
-            Err(_) => break,
-        }
-    }
-    if drained_threads > 0 {
-        clear_resched_flag();
-        debug!("cpu{}: drained {} thread(s) into ready_queue", current_core_id(), drained_threads);
-    }
-}
-
-/// Sends a Reschedule IPI to wake the core with the given id up, if it was idle.
-fn send_reschedule_ipi(target_id: usize) {
-    apic().send_reschedule(per_cpu_apic_id(target_id))
-}
-/// Owner function to set the reschedule flag of the current core.
-pub fn set_resched_flag() {
-    per_cpu_ref(current_core_id() as usize).resched_flag.store(true, Ordering::Release);
-}
-/// Owner function to clear the reschedule flag of the current core.
-pub fn clear_resched_flag() {
-    per_cpu_ref(current_core_id() as usize).resched_flag.store(false, Ordering::Release);
-}
-/// Owner function to read the reschedule flag of the current core.
-pub fn read_resched_flag() -> bool {
-    per_cpu_ref(current_core_id() as usize).resched_flag.load(Ordering::Acquire)
-}
-/// Owner function to increase the runqueue length of the current core.
-pub fn inc_rq_len() {
-    let id = current_core_id() as usize;
-    per_cpu_ref(id).rq_len.fetch_add(1, Ordering::Relaxed);
-}
-/// Owner function to decrease the runqueue length of the current core.
-pub fn dec_rq_len() {
-    let id = current_core_id() as usize;
-    per_cpu_ref(id).rq_len.fetch_sub(1, Ordering::Release); // Release for stronger publication before donating
-}
-/// Owner function to read the runqueue length of the current core.
-pub fn read_rq_len() -> u32 {
-    per_cpu_ref(current_core_id() as usize).rq_len.load(Ordering::Acquire)
-}
-/// Remote Reader function to read the runqueue length of the given Core
-pub fn read_rq_len_remote(target_id: usize) -> u32 {
-    per_cpu_ref(target_id).rq_len.load(Ordering::Acquire)
-}
 
 /// Idle_thread thread that checks for available Threads on other Cores and then
 /// halts the cpu until it gets woken up by interrupts. (Other Cpus need to send first)

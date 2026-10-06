@@ -27,7 +27,7 @@ use crate::memory::PAGE_SIZE;
 use crate::memory::acpi_handler::AcpiHandler;
 use crate::memory::heap::KernelAllocator;
 use crate::process::process_manager::ProcessManager;
-use crate::process::scheduler::{MessageItem, PerCpuRef};
+use crate::process::multicore::{MessageItem, PerCpuRef};
 use crate::syscall::sys_graphic::LfbInfo;
 
 use alloc::boxed::Box;

@@ -1,4 +1,4 @@
-use crate::process::scheduler::set_resched_flag;
+use crate::process::multicore;
 
 pub trait InterruptHandler {
     fn trigger(&self);
@@ -10,6 +10,6 @@ pub struct ReschedIpiHandler;
 impl InterruptHandler for ReschedIpiHandler {
     fn trigger(&self) {
         // flip the per-CPU flag:
-        set_resched_flag();
+        multicore::set_resched_flag();
     }
 }
