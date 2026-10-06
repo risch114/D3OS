@@ -166,6 +166,10 @@ impl Scheduler {
         self.get_ready_state().initialized = true;
     }
 
+    //
+    // ##### Getters #####
+    //
+
     /// returns the number of threads that are currently actively running on this CPU
     /// does not count sleeping threads
     pub fn active_thread_count(&self) -> usize {
@@ -191,7 +195,6 @@ impl Scheduler {
             sum as usize
         }
     }
-
 
     /// Get all active thread IDs
     pub fn active_thread_ids(&self) -> Vec<usize> {
@@ -234,6 +237,78 @@ impl Scheduler {
         (pid, tid)
     }
 
+    /// Helper function returning `ReadyState` of scheduler in a MutexGuard
+    fn get_ready_state(&self) -> MutexGuard<'_, ReadyState> {
+        let state;
+
+        // We need to make sure, that both the kernel memory manager and the ready queue are currently not locked.
+        // Otherwise, a deadlock may occur: Since we are holding the ready queue lock,
+        // the scheduler won't switch threads anymore, and none of the locks will ever be released
+        loop {
+            let state_tmp = self.ready_state.lock();
+            if allocator().is_locked() {    //allocator can be locked again, but only on other cores -> no deadlock, but bottleneck
+                continue;
+            }
+
+            state = state_tmp;
+            break;
+        }
+
+        state
+    }
+
+    /// Description: Helper function returning `ReadyState` and `Map` of scheduler, each in a MutexGuard
+    /// switches Thread on fail, loops back after
+    fn get_ready_state_and_join_map(&self) -> (MutexGuard<'_, ReadyState>, MutexGuard<'_, Map<usize, Vec<Arc<Thread>>>>) {
+        loop {
+            let ready_state = self.get_ready_state();
+            if let Some(join_map) = self.join_map.try_lock() {
+                return (ready_state, join_map);
+            } else {
+                self.switch_thread_no_interrupt();
+            }
+        }
+    }
+
+    /// For ps command - get all processes & threads
+    pub fn get_status(&self, buffer: &mut [u8]) -> Result<usize, Errno> {
+        let mut out = String::new();
+
+        // Current
+        let cur = self.current_thread();
+        let _ = writeln!(out, "PID: {}, TID: {}, State: {:?}, Name: {}", cur.process().id(), cur.id(), ThreadState::Running, cur.process().name());
+
+        // Ready Queue
+        let state = self.get_ready_state();
+        for thread in state.ready_queue.iter() {
+            let _ = writeln!(out, "PID: {}, TID: {}, State: {:?}, Name: {}", thread.process().id(), thread.id(), thread.state(), thread.process().name());
+        }
+
+        // Sleep List
+        let sleep_list = self.sleep_list.lock();
+        for entry in sleep_list.iter() {
+            // You used thread.0 in dump(), so keep that shape
+            let t = &entry.0;
+            let _ = writeln!(out, "PID: {}, TID: {}, State: {:?}, Name: {}", t.process().id(), t.id(), t.state(), t.process().name());
+        }
+        drop(sleep_list);
+
+        // Block list
+        let block_list = self.blocked_list.lock();
+        for thread in block_list.iter() {
+            let _ = writeln!(out, "PID: {}, TID: {}, State: {:?}, Name: {}", thread.process().id(), thread.id(), thread.state(), thread.process().name());
+        }
+        drop(block_list);
+
+        // Copy to caller buffer (truncate if needed)
+        let bytes = out.as_bytes();
+        let len = copy_from_slice_sizechecked!(buffer, bytes);
+        Ok(len)
+    }
+
+    //
+    // ##### Scheduling #####
+    //
 
     /// Start the scheduler, called only once from `boot.rs`
     pub fn start(&mut self) {
@@ -274,68 +349,6 @@ impl Scheduler {
         // Don't override value if key present
         if !join_map.contains_key(&id){
             join_map.insert(id, Vec::new());
-        }
-    }
-
-    /// Put calling thread to sleep for `ms` milliseconds
-    pub fn sleep(&self, ms: usize) {
-        let state = self.get_ready_state();
-
-        if !state.initialized {
-            // Scheduler is not initialized yet, so this function has been called during the boot process
-            // So we do active waiting
-            timer().wait(ms);
-        }
-        else {
-            // Scheduler is initialized, so we can block the calling thread
-            let thread = self.current_thread();
-            thread.set_state(ThreadState::Sleeping);
-            
-            {
-                // Execute in own block, so that the lock is released automatically (block() does not return)
-                let wakeup_time = timer().systime_ms() + ms;
-                let mut sleep_list = self.sleep_list.lock();
-                sleep_list.push((thread, wakeup_time));
-            }
-
-            multicore::dec_rq_len();
-            self.block_and_switch(state);
-        }
-    }
-
-    /// Put calling thread to block
-    pub fn block(&self) {
-        let state = self.get_ready_state();
-
-        if !state.initialized {
-            // Scheduler is not initialized yet, so this function has been called during the boot process
-            // We panic
-            panic!("Scheduler: Cannot block thread before scheduler is initialized!");
-        }
-        else {
-            // Scheduler is initialized, so we can block the calling thread
-            let thread = self.current_thread();
-            thread.set_state(ThreadState::Blocked);
-            {
-                // Execute in own block, so that the lock is released automatically (block() does not return)
-                let mut block_list = self.blocked_list.lock();
-                block_list.push(thread);
-            } // drop lock for block_list
-            //info!("Scheduler::block: switch to next thread");
-            multicore::dec_rq_len();
-            self.block_and_switch(state);
-        }
-    }
-
-    /// Requeue thread with `tid` from process with `pid` to the ready queue of the scheduler
-    pub fn deblock(&self, pid: Uuid, tid: usize) {
-        let mut block_list = self.blocked_list.lock();
-
-        if let Some(pos) = block_list.iter().position(|thread| thread.id() == tid && thread.process().id() == pid) {
-            let thread = block_list.remove(pos);
-            self.ready(thread);
-        } else {
-            multicore::schedule_on_all_others(MessageItem::Cmd(MessageCmd::Deblock {pid, tid}))
         }
     }
 
@@ -390,6 +403,68 @@ impl Scheduler {
         }
         multicore::schedule_on_all_others(MessageItem::Cmd(MessageCmd::JoinTargetExited {tid: thread_id}));
         join_map.remove(&thread_id);
+    }
+    
+    /// Voluntarily yield the CPU to another runnable thread.
+    ///
+    /// Requirements / assumptions:
+    /// - Must be called when it is safe to switch (no stack locks, tss not locked).
+    /// - Does not change Parking/Blocked semantics; caller should set state beforehand if needed.
+    pub fn yield_now(&self) {
+        let mut state = self.get_ready_state();
+
+        if !state.initialized {
+            return;
+        }
+
+        // Current thread
+        let current = self.current_thread();
+
+        // Same restrictions as your timer-driven switching path
+        if current.stacks_locked() || tss().is_locked() {
+            return;
+        }
+
+        // If there is nobody else runnable, don't bother.
+        // (Note: ready_queue does NOT include the current thread yet.)
+        if state.ready_queue.is_empty() {
+            return;
+        }
+
+        // Requeue current as Ready
+        current.set_state(ThreadState::Ready);
+        state.ready_queue.push_front(Arc::clone(&current));
+
+        // Pick next
+        let next = match state.ready_queue.pop_back() {
+            Some(t) => t,
+            None => {
+                // Shouldn't happen because we checked !empty, but be safe
+                current.set_state(ThreadState::Running);
+                return;
+            }
+        };
+
+        next.set_state(ThreadState::Running);
+        // If we ended up picking ourselves (possible if only ourselves was in queue),
+        // return.
+        if next.id() == current.id() {
+            return;
+        }
+
+        // Switch to next
+        let current_ptr = core::ptr::from_ref(current.as_ref());
+        let next_ptr = core::ptr::from_ref(next.as_ref());
+        self.current_thread.set(Some(next));
+
+
+        // ready_state is unlocked in your asm trampoline via unlock_scheduler()
+        // (Thread::switch ultimately calls unlock_scheduler after switch)
+        drop(current);
+
+        unsafe {
+            Thread::switch(current_ptr, next_ptr);
+        }
     }
 
     /// Exit calling thread.
@@ -474,191 +549,6 @@ impl Scheduler {
             multicore::dec_rq_len();
         }
         changed
-    }
-
-    /// Gives out current thread id, then calls other debug methods
-    pub fn debug_scheduler(&self) {
-        let state = self.get_ready_state();
-        let sleep_list = self.sleep_list.lock();
-
-        let nested = disable_int_nested();
-        let id = current_core_id();
-        let nbr_threads = self.active_thread_count() as u32;
-        let own_threads = multicore::read_rq_len() as u32;
-        let nbr_cpus = ACTIVE_CPUS.load(Relaxed);
-        info!("Scheduler {}: Current thread: {}", id, self.current_thread().id());
-        info!("Scheduler{}: total_threads: {}, own_threads: {}, cpus: {}",
-                id, nbr_threads, own_threads, nbr_cpus);
-        info!("Scheduler {}: Ready queue:", id);
-        for thread in &state.ready_queue {
-            info!("  - {}", thread.id());
-        }
-        info!("Scheduler {}: Sleep list:", id);
-        for thread in sleep_list.iter() {
-            info!("  - {}, {}", thread.0.id(), thread.1);
-        }
-        for i in 0..nbr_cpus {
-            info!("Cpu {} has {} active threads running", i, multicore::read_rq_len_remote(i as usize));
-        }
-        enable_int_nested(nested);
-    }
-
-    /// Debugging function to print all threads in the ready queue.
-    pub fn debug_ready_queue(&self) {
-        let state = self.get_ready_state();
-        let id = current_core_id();
-        info!("Scheduler {}: Ready queue:", id);
-        for thread in &state.ready_queue {
-            info!("  - {}", thread.id());
-        }
-    }
-
-    /// Debugging function to print all threads in the sleep list.
-    pub fn debug_sleep_list(&self) {
-        let _state_guard = self.get_ready_state();
-        let sleep_list = self.sleep_list.lock();
-        let id = current_core_id();
-        info!("Scheduler {}: Sleep list:", id);
-        for thread in sleep_list.iter() {
-            info!("  - {}, {}", thread.0.id(), thread.1);
-        }
-    }
-
-    /// Block calling thread and switch to next ready thread.
-    fn block_and_switch(&self, mut state: MutexGuard<ReadyState>) {
-        let mut next_thread = state.ready_queue.pop_back();
-
-        if next_thread.is_none() {
-            // Execute in own if-block, so that the lock is released automatically (block() does not return)
-            let mut sleep_list = self.sleep_list.lock();
-            Scheduler::check_sleep_list(&mut state, &mut sleep_list);
-            multicore::drain_inbox_into_ready(10, &mut state);
-            next_thread = state.ready_queue.pop_back();
-            if next_thread.is_none() {  //still no new thread => switch to idle
-                next_thread = Some(Arc::clone(&state.idle_thread));
-            }
-        }
-
-        let current = self.current_thread.take()
-            .expect("failed to get current thread");
-        let next = next_thread.unwrap();
-
-        // Thread has enqueued itself into sleep list and waited so little,
-        // that it dequeued itself in the meantime
-        if current.id() == next.id() {
-            // put it back in
-            self.current_thread.set(Some(current));
-            return;
-        }
-
-        let current_ptr = ptr::from_ref(current.as_ref());
-        let next_ptr = ptr::from_ref(next.as_ref());
-
-        self.current_thread.set(Some(next));
-        drop(current); // Decrease Rc manually, because Thread::switch does not return
-
-        unsafe {
-            Thread::switch(current_ptr, next_ptr);
-        }
-    }
-
-    /// Prepare to block the calling thread
-    /// Used from wait_queue to prepare the thread for blocking and get its (pid, tid) for later `notify_one` and `notify_all` calls
-    /// Returns (pid, tid)
-    pub fn park_current(&self) -> (Uuid, usize) {
-        let thread = self.current_thread();
-        thread.set_state(ThreadState::Parking);
-        (thread.process().id(), thread.id())
-    }
-
-    /// Block the calling thread, but only if it should still wait.
-    pub fn block_if_parking<F>(&self, mut should_wait: F)
-    where
-        F: FnMut() -> bool,
-    {
-        let state = self.get_ready_state();
-
-        if !state.initialized {
-            return;
-        }
-
-        let thread = self.current_thread();
-        if thread.state() != ThreadState::Parking {
-            // A wakeup raced in between registering and blocking; do not block.
-            return;
-        }
-
-        if !should_wait() {
-            // The condition was satisfied while we were registering; a racing
-            // `unblock` may not have found us, so cancel the block ourselves.
-            thread.set_state(ThreadState::Running);
-            return;
-        }
-
-        thread.set_state(ThreadState::Blocked);
-
-        {
-            let mut block_list = self.blocked_list.lock();
-            block_list.push(Arc::clone(&thread));
-        }
-        multicore::dec_rq_len();
-        self.block_and_switch(state);
-    }
-
-    /// Unblock thread with given (pid, tid). \
-    /// Returns true if thread was found and unblocked, false otherwise.
-    pub fn unblock(&self, pid: Uuid, tid: usize) -> bool {
-       // info!("Unblock: Thread with PID={}, TID={}", pid, tid);
-
-        // Synchronize against `thread_switch`
-        let mut state = self.ready_state.lock();
-
-        // 1) Check if the given thread is in the blocked list -> need to be woken up
-        let blocked_thread: Option<Arc<Thread>> = {
-            let mut block_list = self.blocked_list.lock();
-            if let Some(pos) = block_list.iter().position(|t| t.id() == tid && t.process().id() == pid) {
-                Some(block_list.remove(pos))
-            } else {
-                None
-            }
-        };
-
-        // If we found a blocked thread in the block_list, wake it up
-        if let Some(thread) = blocked_thread {
-            // let mut state = self.get_ready_state();
-            thread.set_state(ThreadState::Ready);
-            state.ready_queue.push_front(Arc::clone(&thread));
-            multicore::inc_rq_len();
-            return true;
-        }
-
-        // 2a) Check if the thread to be woken up is the current thread (it has not been blocked)
-        {
-            let curr_thread = self.current_thread();
-            if curr_thread.id() == tid && curr_thread.process().id() == pid {
-                curr_thread.set_state(ThreadState::Running);
-                return true;
-            }
-
-        // 2b) Check if the thread to be woken up is in the ready queue
-            if state.ready_queue.iter().any(|t| t.id() == tid && t.process().id() == pid) {
-                // Already runnable (e.g. a previous wakeup raced in); nothing to do
-                return true;
-            }
-        }
-
-        // 3) Not found on this core. The thread may be blocked on the
-        // `blocked_list` of another core (the scheduler is core-local), so ask
-        // every other core to deblock it. The owning core's `Deblock` handler
-        // does the matching `multicore::inc_rq_len()`. Only broadcast for live threads to
-        // avoid waking stale (exited) waiters.
-        if is_thread_alive(tid) {
-            drop(state); // release ready_state before cross-core scheduling
-            multicore::schedule_on_all_others(MessageItem::Cmd(MessageCmd::Deblock { pid, tid }));
-            return true;
-        }
-
-        false
     }
 
     /// Switch from current to next thread (from ready queue). \
@@ -753,6 +643,36 @@ impl Scheduler {
         state.last_fpu_thread = Some(current);
     }
 
+    //
+    // ##### Block & Sleep #####
+    //
+
+    /// Put calling thread to sleep for `ms` milliseconds
+    pub fn sleep(&self, ms: usize) {
+        let state = self.get_ready_state();
+
+        if !state.initialized {
+            // Scheduler is not initialized yet, so this function has been called during the boot process
+            // So we do active waiting
+            timer().wait(ms);
+        }
+        else {
+            // Scheduler is initialized, so we can block the calling thread
+            let thread = self.current_thread();
+            thread.set_state(ThreadState::Sleeping);
+            
+            {
+                // Execute in own block, so that the lock is released automatically (block() does not return)
+                let wakeup_time = timer().systime_ms() + ms;
+                let mut sleep_list = self.sleep_list.lock();
+                sleep_list.push((thread, wakeup_time));
+            }
+
+            multicore::dec_rq_len();
+            self.block_and_switch(state);
+        }
+    }
+
     /// Check the sleep list for threads that need to be woken up
     fn check_sleep_list(state: &mut ReadyState, sleep_list: &mut Vec<(Arc<Thread>, usize)>) {
         let time = timer().systime_ms();
@@ -768,134 +688,228 @@ impl Scheduler {
         });
     }
 
-    /// Helper function returning `ReadyState` of scheduler in a MutexGuard
-    fn get_ready_state(&self) -> MutexGuard<'_, ReadyState> {
-        let state;
-
-        // We need to make sure, that both the kernel memory manager and the ready queue are currently not locked.
-        // Otherwise, a deadlock may occur: Since we are holding the ready queue lock,
-        // the scheduler won't switch threads anymore, and none of the locks will ever be released
-        loop {
-            let state_tmp = self.ready_state.lock();
-            if allocator().is_locked() {    //allocator can be locked again, but only on other cores -> no deadlock, but bottleneck
-                continue;
-            }
-
-            state = state_tmp;
-            break;
-        }
-
-        state
-    }
-
-    /// Description: Helper function returning `ReadyState` and `Map` of scheduler, each in a MutexGuard
-    /// switches Thread on fail, loops back after
-    fn get_ready_state_and_join_map(&self) -> (MutexGuard<'_, ReadyState>, MutexGuard<'_, Map<usize, Vec<Arc<Thread>>>>) {
-        loop {
-            let ready_state = self.get_ready_state();
-            if let Some(join_map) = self.join_map.try_lock() {
-                return (ready_state, join_map);
-            } else {
-                self.switch_thread_no_interrupt();
-            }
-        }
-    }
-
-    /// For ps command - get all processes & threads
-    pub fn get_status(&self, buffer: &mut [u8]) -> Result<usize, Errno> {
-        let mut out = String::new();
-
-        // Current
-        let cur = self.current_thread();
-        let _ = writeln!(out, "PID: {}, TID: {}, State: {:?}, Name: {}", cur.process().id(), cur.id(), ThreadState::Running, cur.process().name());
-
-        // Ready Queue
+    /// Put calling thread to block
+    pub fn block(&self) {
         let state = self.get_ready_state();
-        for thread in state.ready_queue.iter() {
-            let _ = writeln!(out, "PID: {}, TID: {}, State: {:?}, Name: {}", thread.process().id(), thread.id(), thread.state(), thread.process().name());
-        }
 
-        // Sleep List
-        let sleep_list = self.sleep_list.lock();
-        for entry in sleep_list.iter() {
-            // You used thread.0 in dump(), so keep that shape
-            let t = &entry.0;
-            let _ = writeln!(out, "PID: {}, TID: {}, State: {:?}, Name: {}", t.process().id(), t.id(), t.state(), t.process().name());
+        if !state.initialized {
+            // Scheduler is not initialized yet, so this function has been called during the boot process
+            // We panic
+            panic!("Scheduler: Cannot block thread before scheduler is initialized!");
         }
-        drop(sleep_list);
-
-        // Block list
-        let block_list = self.blocked_list.lock();
-        for thread in block_list.iter() {
-            let _ = writeln!(out, "PID: {}, TID: {}, State: {:?}, Name: {}", thread.process().id(), thread.id(), thread.state(), thread.process().name());
+        else {
+            // Scheduler is initialized, so we can block the calling thread
+            let thread = self.current_thread();
+            thread.set_state(ThreadState::Blocked);
+            {
+                // Execute in own block, so that the lock is released automatically (block() does not return)
+                let mut block_list = self.blocked_list.lock();
+                block_list.push(thread);
+            } // drop lock for block_list
+            //info!("Scheduler::block: switch to next thread");
+            multicore::dec_rq_len();
+            self.block_and_switch(state);
         }
-        drop(block_list);
-
-        // Copy to caller buffer (truncate if needed)
-        let bytes = out.as_bytes();
-        let len = copy_from_slice_sizechecked!(buffer, bytes);
-        Ok(len)
     }
-    
-    /// Voluntarily yield the CPU to another runnable thread.
-    ///
-    /// Requirements / assumptions:
-    /// - Must be called when it is safe to switch (no stack locks, tss not locked).
-    /// - Does not change Parking/Blocked semantics; caller should set state beforehand if needed.
-    pub fn yield_now(&self) {
-        let mut state = self.get_ready_state();
+
+    /// Prepare to block the calling thread
+    /// Used from wait_queue to prepare the thread for blocking and get its (pid, tid) for later `notify_one` and `notify_all` calls
+    /// Returns (pid, tid)
+    pub fn park_current(&self) -> (Uuid, usize) {
+        let thread = self.current_thread();
+        thread.set_state(ThreadState::Parking);
+        (thread.process().id(), thread.id())
+    }
+
+    /// Block the calling thread, but only if it should still wait.
+    pub fn block_if_parking<F>(&self, mut should_wait: F)
+    where
+        F: FnMut() -> bool,
+    {
+        let state = self.get_ready_state();
 
         if !state.initialized {
             return;
         }
 
-        // Current thread
-        let current = self.current_thread();
-
-        // Same restrictions as your timer-driven switching path
-        if current.stacks_locked() || tss().is_locked() {
+        let thread = self.current_thread();
+        if thread.state() != ThreadState::Parking {
+            // A wakeup raced in between registering and blocking; do not block.
             return;
         }
 
-        // If there is nobody else runnable, don't bother.
-        // (Note: ready_queue does NOT include the current thread yet.)
-        if state.ready_queue.is_empty() {
+        if !should_wait() {
+            // The condition was satisfied while we were registering; a racing
+            // `unblock` may not have found us, so cancel the block ourselves.
+            thread.set_state(ThreadState::Running);
             return;
         }
 
-        // Requeue current as Ready
-        current.set_state(ThreadState::Ready);
-        state.ready_queue.push_front(Arc::clone(&current));
+        thread.set_state(ThreadState::Blocked);
 
-        // Pick next
-        let next = match state.ready_queue.pop_back() {
-            Some(t) => t,
-            None => {
-                // Shouldn't happen because we checked !empty, but be safe
-                current.set_state(ThreadState::Running);
-                return;
+        {
+            let mut block_list = self.blocked_list.lock();
+            block_list.push(Arc::clone(&thread));
+        }
+        multicore::dec_rq_len();
+        self.block_and_switch(state);
+    }
+
+    /// Block calling thread and switch to next ready thread.
+    fn block_and_switch(&self, mut state: MutexGuard<ReadyState>) {
+        let mut next_thread = state.ready_queue.pop_back();
+
+        if next_thread.is_none() {
+            // Execute in own if-block, so that the lock is released automatically (block() does not return)
+            let mut sleep_list = self.sleep_list.lock();
+            Scheduler::check_sleep_list(&mut state, &mut sleep_list);
+            multicore::drain_inbox_into_ready(10, &mut state);
+            next_thread = state.ready_queue.pop_back();
+            if next_thread.is_none() {  //still no new thread => switch to idle
+                next_thread = Some(Arc::clone(&state.idle_thread));
             }
-        };
+        }
 
-        next.set_state(ThreadState::Running);
-        // If we ended up picking ourselves (possible if only ourselves was in queue),
-        // return.
-        if next.id() == current.id() {
+        let current = self.current_thread.take()
+            .expect("failed to get current thread");
+        let next = next_thread.unwrap();
+
+        // Thread has enqueued itself into sleep list and waited so little,
+        // that it dequeued itself in the meantime
+        if current.id() == next.id() {
+            // put it back in
+            self.current_thread.set(Some(current));
             return;
         }
 
-        // Switch to next
-        let current_ptr = core::ptr::from_ref(current.as_ref());
-        let next_ptr = core::ptr::from_ref(next.as_ref());
+        let current_ptr = ptr::from_ref(current.as_ref());
+        let next_ptr = ptr::from_ref(next.as_ref());
+
         self.current_thread.set(Some(next));
-
-
-        // ready_state is unlocked in your asm trampoline via unlock_scheduler()
-        // (Thread::switch ultimately calls unlock_scheduler after switch)
-        drop(current);
+        drop(current); // Decrease Rc manually, because Thread::switch does not return
 
         unsafe {
             Thread::switch(current_ptr, next_ptr);
+        }
+    }
+
+    /// Requeue thread with `tid` from process with `pid` to the ready queue of the scheduler
+    pub fn deblock(&self, pid: Uuid, tid: usize) {
+        let mut block_list = self.blocked_list.lock();
+
+        if let Some(pos) = block_list.iter().position(|thread| thread.id() == tid && thread.process().id() == pid) {
+            let thread = block_list.remove(pos);
+            self.ready(thread);
+        } else {
+            multicore::schedule_on_all_others(MessageItem::Cmd(MessageCmd::Deblock {pid, tid}))
+        }
+    }
+
+    /// Unblock thread with given (pid, tid). \
+    /// Returns true if thread was found and unblocked, false otherwise.
+    pub fn unblock(&self, pid: Uuid, tid: usize) -> bool {
+       // info!("Unblock: Thread with PID={}, TID={}", pid, tid);
+
+        // Synchronize against `thread_switch`
+        let mut state = self.ready_state.lock();
+
+        // 1) Check if the given thread is in the blocked list -> need to be woken up
+        let blocked_thread: Option<Arc<Thread>> = {
+            let mut block_list = self.blocked_list.lock();
+            if let Some(pos) = block_list.iter().position(|t| t.id() == tid && t.process().id() == pid) {
+                Some(block_list.remove(pos))
+            } else {
+                None
+            }
+        };
+
+        // If we found a blocked thread in the block_list, wake it up
+        if let Some(thread) = blocked_thread {
+            // let mut state = self.get_ready_state();
+            thread.set_state(ThreadState::Ready);
+            state.ready_queue.push_front(Arc::clone(&thread));
+            multicore::inc_rq_len();
+            return true;
+        }
+
+        // 2a) Check if the thread to be woken up is the current thread (it has not been blocked)
+        {
+            let curr_thread = self.current_thread();
+            if curr_thread.id() == tid && curr_thread.process().id() == pid {
+                curr_thread.set_state(ThreadState::Running);
+                return true;
+            }
+
+        // 2b) Check if the thread to be woken up is in the ready queue
+            if state.ready_queue.iter().any(|t| t.id() == tid && t.process().id() == pid) {
+                // Already runnable (e.g. a previous wakeup raced in); nothing to do
+                return true;
+            }
+        }
+
+        // 3) Not found on this core. The thread may be blocked on the
+        // `blocked_list` of another core (the scheduler is core-local), so ask
+        // every other core to deblock it. The owning core's `Deblock` handler
+        // does the matching `multicore::inc_rq_len()`. Only broadcast for live threads to
+        // avoid waking stale (exited) waiters.
+        if is_thread_alive(tid) {
+            drop(state); // release ready_state before cross-core scheduling
+            multicore::schedule_on_all_others(MessageItem::Cmd(MessageCmd::Deblock { pid, tid }));
+            return true;
+        }
+
+        false
+    }
+
+    //
+    // ##### Debug Functions #####
+    //
+
+    /// Gives out current thread id, then calls other debug methods
+    pub fn debug_scheduler(&self) {
+        let state = self.get_ready_state();
+        let sleep_list = self.sleep_list.lock();
+
+        let nested = disable_int_nested();
+        let id = current_core_id();
+        let nbr_threads = self.active_thread_count() as u32;
+        let own_threads = multicore::read_rq_len() as u32;
+        let nbr_cpus = ACTIVE_CPUS.load(Relaxed);
+        info!("Scheduler {}: Current thread: {}", id, self.current_thread().id());
+        info!("Scheduler{}: total_threads: {}, own_threads: {}, cpus: {}",
+                id, nbr_threads, own_threads, nbr_cpus);
+        info!("Scheduler {}: Ready queue:", id);
+        for thread in &state.ready_queue {
+            info!("  - {}", thread.id());
+        }
+        info!("Scheduler {}: Sleep list:", id);
+        for thread in sleep_list.iter() {
+            info!("  - {}, {}", thread.0.id(), thread.1);
+        }
+        for i in 0..nbr_cpus {
+            info!("Cpu {} has {} active threads running", i, multicore::read_rq_len_remote(i as usize));
+        }
+        enable_int_nested(nested);
+    }
+
+    /// Debugging function to print all threads in the ready queue.
+    pub fn debug_ready_queue(&self) {
+        let state = self.get_ready_state();
+        let id = current_core_id();
+        info!("Scheduler {}: Ready queue:", id);
+        for thread in &state.ready_queue {
+            info!("  - {}", thread.id());
+        }
+    }
+
+    /// Debugging function to print all threads in the sleep list.
+    pub fn debug_sleep_list(&self) {
+        let _state_guard = self.get_ready_state();
+        let sleep_list = self.sleep_list.lock();
+        let id = current_core_id();
+        info!("Scheduler {}: Sleep list:", id);
+        for thread in sleep_list.iter() {
+            info!("  - {}, {}", thread.0.id(), thread.1);
         }
     }
 }
