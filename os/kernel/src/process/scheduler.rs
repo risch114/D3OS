@@ -27,7 +27,7 @@
 use crate::process::thread::{Thread, ThreadState};
 use crate::process::multicore;
 use crate::process::multicore::{MessageCmd, MessageItem};
-use crate::{allocator, apic, per_cpu_ref, timer, tss};
+use crate::{allocator, apic, timer, tss};
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -42,7 +42,6 @@ use core::cell::Cell;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::sync::atomic::AtomicU32;
-use core::sync::atomic::Ordering::{Relaxed};
 use log::info;
 use smallmap::Map;
 use spin::{Mutex, MutexGuard, Once};
@@ -51,7 +50,7 @@ use crate::process::core_local_storage::{current_core_id, scheduler, tss_static}
 
 // thread IDs
 pub static THREAD_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
-pub(super) static ACTIVE_CPUS: AtomicU32 = AtomicU32::new(1);  //BP automatically
+static ACTIVE_CPUS: AtomicU32 = AtomicU32::new(1);  // BP automatically
 
 /// Global set of "alive" thread IDs (across all cores).
 /// Presence means: joining on this tid should block (unless it exits concurrently).
@@ -81,17 +80,17 @@ pub fn is_thread_alive(tid: usize) -> bool {
 
 #[inline]
 pub fn next_thread_id() -> usize {
-    THREAD_ID_COUNTER.fetch_add(1, Relaxed)
+    THREAD_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 #[inline]
 pub fn cpu_mark_online() {
-    ACTIVE_CPUS.fetch_add(1, Relaxed);
+    ACTIVE_CPUS.fetch_add(1, Ordering::Relaxed);
 }
 
 #[inline]
 pub fn cpu_count() -> u32 {
-    ACTIVE_CPUS.load(Relaxed)
+    ACTIVE_CPUS.load(Ordering::Relaxed)
 }
 
 /// Everything related to the threads in ready state in the scheduler
@@ -169,32 +168,6 @@ impl Scheduler {
     //
     // ##### Getters #####
     //
-
-    /// returns the number of threads that are currently actively running on this CPU
-    /// does not count sleeping threads
-    pub fn active_thread_count(&self) -> usize {
-        let mut sum: u32 = 0;
-        let active = ACTIVE_CPUS.load(Relaxed);
-        for i in 0..active {
-            let rq = per_cpu_ref(i as usize).rq_len.load(Ordering::Acquire);
-            // Detect runaway counters without panicking the whole kernel in debug
-            match sum.checked_add(rq) {
-                Some(s) => sum = s,
-                None => {
-                    log::error!("active_thread_count overflow while adding cpu {} rq_len={}", i, rq);
-                    return usize::MAX; // saturate to a sentinel
-                }
-            }
-        }
-
-        // Clamp to usize on 32-bit safely (and give a clear sentinel on 32-bit if it ever overflows)
-        if sum > usize::MAX as u32 {
-            log::error!("active_thread_count exceeds usize: {}", sum);
-            usize::MAX
-        } else {
-            sum as usize
-        }
-    }
 
     /// Get all active thread IDs
     pub fn active_thread_ids(&self) -> Vec<usize> {
@@ -872,9 +845,9 @@ impl Scheduler {
 
         let nested = disable_int_nested();
         let id = current_core_id();
-        let nbr_threads = self.active_thread_count() as u32;
+        let nbr_threads = active_thread_count(true) as u32;
         let own_threads = multicore::read_rq_len() as u32;
-        let nbr_cpus = ACTIVE_CPUS.load(Relaxed);
+        let nbr_cpus = cpu_count();
         info!("Scheduler {}: Current thread: {}", id, self.current_thread().id());
         info!("Scheduler{}: total_threads: {}, own_threads: {}, cpus: {}",
                 id, nbr_threads, own_threads, nbr_cpus);
@@ -911,6 +884,23 @@ impl Scheduler {
         for thread in sleep_list.iter() {
             info!("  - {}, {}", thread.0.id(), thread.1);
         }
+    }
+}
+
+
+/// returns the number of threads that are currently actively running (on this CPU)
+/// does not count sleeping or blocked threads
+pub fn active_thread_count(global: bool) -> usize {
+    if !global {
+        multicore::read_rq_len() as usize
+    } else {
+        let mut sum = 0;
+        let num_cpus = cpu_count() as usize;
+        for cpu_id in 0..num_cpus {
+            let rq = multicore::read_rq_len_remote(cpu_id);
+            sum += rq;
+        }
+        sum as usize
     }
 }
 

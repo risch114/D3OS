@@ -4,7 +4,8 @@
 //
 //
 use crate::process::thread::{Thread, ThreadState};
-use crate::process::scheduler::{ACTIVE_CPUS, ReadyState, Scheduler, is_thread_alive};
+use crate::process::scheduler;
+use crate::process::scheduler::{ReadyState, Scheduler};
 use crate::process::core_local_storage::{cls, current_core_id, scheduler};
 use crate::device::apic::get_apic_id;
 use crate::apic;
@@ -22,13 +23,14 @@ impl Scheduler {
     /// Checks whether the current core should balance its threads.
     /// returns own_threads > (nbr_threads /nbr_cpus +1)
     pub(super) fn should_balance_now(&self) -> bool {
-        let nbr_threads = self.active_thread_count() as u32;
-        let own_threads = read_rq_len() as u32;
-        let nbr_cpus = ACTIVE_CPUS.load(Ordering::Relaxed);
-        if own_threads > (nbr_threads /nbr_cpus +1){
+        let total_threads = scheduler::active_thread_count(true) as u32;
+        let own_threads = read_rq_len();
+        let nbr_cpus = scheduler::cpu_count();
+        if own_threads > (total_threads / nbr_cpus + 1) {
             /*debug!("Scheduler{}: total_threads: {}, own_threads: {}, cpus: {}",
                 current_core_id(), nbr_threads, own_threads, nbr_cpus);*/
-            return true }
+            return true
+        }
         false
     }
 
@@ -85,7 +87,7 @@ impl Scheduler {
         // Inspect per-core exported metrics
         let mut curr: usize = 0;
         let mut min = read_rq_len_remote(0);
-        for i in 1..ACTIVE_CPUS.load(Ordering::Relaxed) as usize {
+        for i in 1..scheduler::cpu_count() as usize {
             if min > read_rq_len_remote(i) {
                 min = read_rq_len_remote(i);
                 curr = i;
@@ -102,7 +104,7 @@ impl Scheduler {
         // Inspect per-core exported metrics
         let mut curr: usize = 0;
         let mut max = read_rq_len_remote(0);
-        for i in 1..ACTIVE_CPUS.load(Ordering::Relaxed) as usize {
+        for i in 1..scheduler::cpu_count() as usize {
             if max < read_rq_len_remote(i) {
                 max = read_rq_len_remote(i);
                 curr = i;
@@ -142,7 +144,7 @@ impl Scheduler {
             // If the thread is locally blocked, requeue it.
             MessageCmd::Deblock { pid, tid } => {
                 let mut blocked_list = self.blocked_list.lock();
-                if is_thread_alive(tid) == false { return; }
+                if scheduler::is_thread_alive(tid) == false { return; }
 
                 if let Some(pos) = blocked_list
                     .iter().position(|t| t.id() == tid && t.process().id() == pid)
@@ -155,7 +157,7 @@ impl Scheduler {
             }
             // if you have this thread, kill it
             MessageCmd::Kill { tid } => {
-                if is_thread_alive(tid) == false { return; }
+                if scheduler::is_thread_alive(tid) == false { return; }
                 let thread = self.current_thread();
                 if thread.id() == tid { //cant kill itself, reschedule for other thread
                     let _ = schedule_on(current_core_id() as usize, MessageItem::Cmd(MessageCmd::Kill { tid }));
@@ -264,7 +266,7 @@ pub fn schedule_on(target_id: usize, item: MessageItem) -> Result<(), MessageIte
 /// Does not send reschedule IPI's since only one core needs to actually do something
 pub fn schedule_on_all_others(item: MessageItem) {
     let own_id = current_core_id() as usize;
-    for i in 0..ACTIVE_CPUS.load(Ordering::Acquire) as usize {
+    for i in 0..scheduler::cpu_count() as usize {
         if i != own_id {
             let pc = per_cpu_ref(i);
             pc.tx.try_send(Some(item.clone())).expect("Failed to send message to remote core!");
