@@ -1,6 +1,6 @@
 use crate::interrupt::interrupt_handler::InterruptHandler;
 use crate::memory::MemorySpace;
-use crate::memory;
+use crate::{allocator, memory};
 use crate::memory::vma::VmaType;
 use crate::process::core_local_storage::scheduler;
 use crate::{apic, idt, interrupt_dispatcher};
@@ -223,8 +223,7 @@ fn handle_exception(frame: InterruptStackFrame, index: u8, error: Option<u64>) {
 fn handle_page_fault(frame: InterruptStackFrame, _index: u8, error: Option<u64>) {
     unsafe { maybe_swapgs(&frame) };
     let fault_addr = Cr2::read().expect("Invalid address in CR2 during page fault");
-    let thread = scheduler().try_get_current_thread();
-    if thread.is_none() {
+    if allocator().is_locked() {
         // if we don't have access to the scheduler, delay handling the page fault
         // the application will access again, causing a new page fault
         warn!("Page Fault at 0x{:0>16x} (code: {:?}), cannot get lock to scheduler", fault_addr, error);
@@ -232,7 +231,7 @@ fn handle_page_fault(frame: InterruptStackFrame, _index: u8, error: Option<u64>)
         return;
     }
 
-    let thread = thread.unwrap();
+    let thread = scheduler().current_thread();
 
     // Was the page fault caused by a user thread?
     if !thread.is_kernel_thread() {

@@ -174,25 +174,15 @@ impl Scheduler {
         Vec::from_iter(active_tids().lock().iter().cloned().map(|t | t.0))
     }
 
-    /// Return the current running thread
+    /// Return the current running thread \
+    /// This function will panic if there is no currently running thread (i.e. before scheduler init)
     pub fn current_thread(&self) -> Arc<Thread> {
-        self.try_current_thread()
-            .expect("Trying to access current thread before initialization!")
+        self.try_current_thread().expect("Trying to access current thread before initialization!")
     }
 
     /// Return reference to current thread, if possible.
     pub fn try_current_thread(&self) -> Option<Arc<Thread>> {
-        self.current_thread
-            .get_cloned()
-            .take()
-    }
-
-    /// Try to return reference to current thread (called from interrupt dispatcher)
-    pub fn try_get_current_thread(&self) -> Option<Arc<Thread>> {
-        if allocator().is_locked() {
-            return None;
-        }
-        self.try_current_thread()
+        self.current_thread.get_cloned().take()
     }
 
     /// Return reference to thread identified by `thread_id`
