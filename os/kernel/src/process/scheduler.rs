@@ -910,7 +910,7 @@ pub fn active_thread_count(global: bool) -> usize {
 /// halts the cpu until it gets woken up by interrupts. (Other Cpus need to send first)
 extern "sysv64" fn idle_thread () -> () {   //should never return but new_kernel_thread requires it
     loop {
-        multicore::look_for_overloaded_core();
+        multicore::try_reschedule_overloaded_core();
         unsafe {
             asm!("hlt");
         }

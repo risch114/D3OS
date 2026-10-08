@@ -230,8 +230,8 @@ pub(super) fn balance_once(state: &mut ReadyState) {
     }
 }
 
-/// Finds the core with the least number of threads.
-/// returns (target_core, target_load)
+/// Finds the core with the least number of threads. \
+/// Returns (target_core, target_load) or None if we are the core with the least threads
 fn find_less_loaded_core() -> Option<(usize, usize)> {
     // Inspect per-core exported metrics
     let mut curr: usize = 0;
@@ -247,11 +247,11 @@ fn find_less_loaded_core() -> Option<(usize, usize)> {
     Some((curr, min as usize))
 }
 
-/// Finds the core with the most number of threads.
-/// returns the target's Core Id
+/// Finds the core with the most number of threads. \
+/// Returns the target's Core Id or None if we are the core with the most threads
 fn find_more_loaded_core() -> Option<usize> {
     // Inspect per-core exported metrics
-    let mut curr: usize = 0;
+    let mut curr = 0;
     let mut max = read_rq_len_remote(0);
     for i in 1..scheduler::cpu_count() as usize {
         if max < read_rq_len_remote(i) {
@@ -259,18 +259,22 @@ fn find_more_loaded_core() -> Option<usize> {
             curr = i;
         };
     }
-    let own = read_rq_len();
-    if max <= own || max < 2 { return None; }
+    // every core has one thread
+    if max < 2 {
+        return None;
+    }
+    // check if we are the maximum
+    if curr == current_core_id() as usize {
+        return None;
+    }
     Some(curr)
 }
 
 /// Forces a core with more than 2 threads to migrate one through a Reschedule IPI.
 /// (Sends a reschedule IPI that will result in a migration within switch_thread())
-pub fn look_for_overloaded_core() {
-    let overloaded_core = find_more_loaded_core();
-    match overloaded_core {
-        None => return,
-        Some(target_id) => send_reschedule_ipi(target_id)
+pub fn try_reschedule_overloaded_core() {
+    if let Some(target_id) = find_more_loaded_core() {
+        send_reschedule_ipi(target_id);
     }
 }
 
@@ -332,7 +336,7 @@ pub fn dec_rq_len() {
 }
 /// Owner function to read the runqueue length of the current core.
 pub fn read_rq_len() -> u32 {
-    per_cpu_ref(current_core_id() as usize).rq_len.load(Ordering::Acquire)
+    read_rq_len_remote(current_core_id() as usize)
 }
 /// Remote Reader function to read the runqueue length of the given Core
 pub fn read_rq_len_remote(target_id: usize) -> u32 {
