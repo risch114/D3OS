@@ -20,111 +20,6 @@ use uuid::Uuid;
 
 impl Scheduler {
 
-    /// Checks whether the current core should balance its threads.
-    /// returns own_threads > (nbr_threads /nbr_cpus +1)
-    pub(super) fn should_balance_now(&self) -> bool {
-        let total_threads = scheduler::active_thread_count(true) as u32;
-        let own_threads = read_rq_len();
-        let nbr_cpus = scheduler::cpu_count();
-        if own_threads > (total_threads / nbr_cpus + 1) {
-            /*debug!("Scheduler{}: total_threads: {}, own_threads: {}, cpus: {}",
-                current_core_id(), nbr_threads, own_threads, nbr_cpus);*/
-            return true
-        }
-        false
-    }
-
-    /// Balances the threads on the current core by moving one thread from the tail to the target core.
-    /// Target core is the core with the least number of threads.
-    /// Returns the new state of the scheduler. (needed for mutable access)
-    pub(super) fn balance_once(&self, state: &mut ReadyState) {
-        let own_load = read_rq_len() as usize;
-        if own_load <= 1 {
-            //debug!("Scheduler: Cannot balance, current load ({:?}) is too low!", own_load);
-            return;
-        }
-
-        if let Some((target_core, target_load)) = self.find_less_loaded_core() {
-            if own_load >= target_load + 2 {
-                let amount = ((own_load-target_load)/4)+1;
-                for _ in 0..amount {
-                    // Move one thread from the tail to the target
-                    let thread_opt = state.ready_queue.pop_front();
-                    if let Some(thread) = thread_opt {
-                        // If we can't migrate this thread, skip it.
-                        // This makes us migrate one less thread than we wanted,
-                        // but this should be okay in general.
-                        if !thread.can_migrate() {
-                            info!("cannot migrate {thread:?}, skipping");
-                            state.ready_queue.push_back(thread);
-                            continue;
-                        }
-
-                        // Check if the migrating thread is the last thread on this core that has used the FPU.
-                        // If so, we need to reset `last_fpu_thread` to None.
-                        // We do not need to store the FPU context of the migrating thread,
-                        // as we always take a thread from the ready queue and never the current thread.
-                        if state.last_fpu_thread.is_some() {
-                            if state.last_fpu_thread.as_ref().unwrap().id() == thread.id() {
-                                state.last_fpu_thread = None;
-                            }
-                        }
-                        let _tid = thread.id();
-                        let w = MessageItem::new_thread(thread);
-                        dec_rq_len();
-                        if let Ok(_r) = schedule_on(target_core, w) {
-                            debug!(" Scheduler{}: Scheduled thread {} on core {}", current_core_id(), _tid, target_core);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Finds the core with the least number of threads.
-    /// returns (target_core, target_load)
-    fn find_less_loaded_core(&self) -> Option<(usize, usize)> {
-        // Inspect per-core exported metrics
-        let mut curr: usize = 0;
-        let mut min = read_rq_len_remote(0);
-        for i in 1..scheduler::cpu_count() as usize {
-            if min > read_rq_len_remote(i) {
-                min = read_rq_len_remote(i);
-                curr = i;
-            }
-        }
-        let own = read_rq_len();
-        if min >= own { return None; }
-        Some((curr, min as usize))
-    }
-
-    /// Finds the core with the most number of threads.
-    /// returns the target's Core Id
-    fn find_more_loaded_core(&self) -> Option<usize> {
-        // Inspect per-core exported metrics
-        let mut curr: usize = 0;
-        let mut max = read_rq_len_remote(0);
-        for i in 1..scheduler::cpu_count() as usize {
-            if max < read_rq_len_remote(i) {
-                max = read_rq_len_remote(i);
-                curr = i;
-            };
-        }
-        let own = read_rq_len();
-        if max <= own || max < 2 { return None; }
-        Some(curr)
-    }
-
-    /// Forces a core with more than 2 threads to migrate one through a Reschedule IPI.
-    /// (Sends a reschedule IPI that will result in a migration within switch_thread())
-    pub fn look_for_overloaded_core(&self) {
-        let overloaded_core = self.find_more_loaded_core();
-        match overloaded_core {
-            None => return,
-            Some(target_id) => send_reschedule_ipi(target_id)
-        }
-    }
-
     /// Handle a command received via inbox, using the already-held ready_state lock (`state`).
     fn handle_inbox_cmd(&self, cmd: MessageCmd, state: &mut ReadyState) {
         match cmd {
@@ -271,6 +166,111 @@ pub fn schedule_on_all_others(item: MessageItem) {
             let pc = per_cpu_ref(i);
             pc.tx.try_send(Some(item.clone())).expect("Failed to send message to remote core!");
         }
+    }
+}
+
+/// Checks whether the current core should balance its threads.
+/// returns own_threads > (nbr_threads / nbr_cpus + 1)
+pub(super) fn should_balance_now() -> bool {
+    let total_threads = scheduler::active_thread_count(true) as u32;
+    let own_threads = read_rq_len();
+    let nbr_cpus = scheduler::cpu_count();
+    if own_threads > (total_threads / nbr_cpus + 1) {
+        /*debug!("Scheduler{}: total_threads: {}, own_threads: {}, cpus: {}",
+            current_core_id(), nbr_threads, own_threads, nbr_cpus);*/
+        return true
+    }
+    false
+}
+
+/// Balances the threads on the current core by moving one thread from the tail to the target core.
+/// Target core is the core with the least number of threads.
+/// Returns the new state of the scheduler. (needed for mutable access)
+pub(super) fn balance_once(state: &mut ReadyState) {
+    let own_load = read_rq_len() as usize;
+    if own_load <= 1 {
+        //debug!("Scheduler: Cannot balance, current load ({:?}) is too low!", own_load);
+        return;
+    }
+
+    if let Some((target_core, target_load)) = find_less_loaded_core() {
+        if own_load >= target_load + 2 {
+            let amount = ((own_load-target_load)/4)+1;
+            for _ in 0..amount {
+                // Move one thread from the tail to the target
+                let thread_opt = state.ready_queue.pop_front();
+                if let Some(thread) = thread_opt {
+                    // If we can't migrate this thread, skip it.
+                    // This makes us migrate one less thread than we wanted,
+                    // but this should be okay in general.
+                    if !thread.can_migrate() {
+                        info!("cannot migrate {thread:?}, skipping");
+                        state.ready_queue.push_back(thread);
+                        continue;
+                    }
+
+                    // Check if the migrating thread is the last thread on this core that has used the FPU.
+                    // If so, we need to reset `last_fpu_thread` to None.
+                    // We do not need to store the FPU context of the migrating thread,
+                    // as we always take a thread from the ready queue and never the current thread.
+                    if state.last_fpu_thread.is_some() {
+                        if state.last_fpu_thread.as_ref().unwrap().id() == thread.id() {
+                            state.last_fpu_thread = None;
+                        }
+                    }
+                    let _tid = thread.id();
+                    let w = MessageItem::new_thread(thread);
+                    dec_rq_len();
+                    if let Ok(_r) = schedule_on(target_core, w) {
+                        debug!(" Scheduler{}: Scheduled thread {} on core {}", current_core_id(), _tid, target_core);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Finds the core with the least number of threads.
+/// returns (target_core, target_load)
+fn find_less_loaded_core() -> Option<(usize, usize)> {
+    // Inspect per-core exported metrics
+    let mut curr: usize = 0;
+    let mut min = read_rq_len_remote(0);
+    for i in 1..scheduler::cpu_count() as usize {
+        if min > read_rq_len_remote(i) {
+            min = read_rq_len_remote(i);
+            curr = i;
+        }
+    }
+    let own = read_rq_len();
+    if min >= own { return None; }
+    Some((curr, min as usize))
+}
+
+/// Finds the core with the most number of threads.
+/// returns the target's Core Id
+fn find_more_loaded_core() -> Option<usize> {
+    // Inspect per-core exported metrics
+    let mut curr: usize = 0;
+    let mut max = read_rq_len_remote(0);
+    for i in 1..scheduler::cpu_count() as usize {
+        if max < read_rq_len_remote(i) {
+            max = read_rq_len_remote(i);
+            curr = i;
+        };
+    }
+    let own = read_rq_len();
+    if max <= own || max < 2 { return None; }
+    Some(curr)
+}
+
+/// Forces a core with more than 2 threads to migrate one through a Reschedule IPI.
+/// (Sends a reschedule IPI that will result in a migration within switch_thread())
+pub fn look_for_overloaded_core() {
+    let overloaded_core = find_more_loaded_core();
+    match overloaded_core {
+        None => return,
+        Some(target_id) => send_reschedule_ipi(target_id)
     }
 }
 

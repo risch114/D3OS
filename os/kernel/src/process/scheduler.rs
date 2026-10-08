@@ -552,8 +552,8 @@ impl Scheduler {
             multicore::drain_inbox_into_ready(10, &mut state);
 
             // Check if this core has too many threads running
-            if multicore::read_resched_flag() || self.should_balance_now() {
-                self.balance_once(&mut state);
+            if multicore::read_resched_flag() || multicore::should_balance_now() {
+                multicore::balance_once(&mut state);
             }
 
             // Get clone of the current thread
@@ -910,7 +910,7 @@ pub fn active_thread_count(global: bool) -> usize {
 /// halts the cpu until it gets woken up by interrupts. (Other Cpus need to send first)
 extern "sysv64" fn idle_thread () -> () {   //should never return but new_kernel_thread requires it
     loop {
-        scheduler().look_for_overloaded_core();
+        multicore::look_for_overloaded_core();
         unsafe {
             asm!("hlt");
         }
