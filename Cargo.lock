@@ -1456,6 +1456,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "service_speaker"
+version = "0.1.0"
+dependencies = [
+ "concurrent",
+ "ipc",
+ "runtime",
+ "syscall",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

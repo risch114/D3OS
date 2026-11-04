@@ -406,7 +406,6 @@ pub extern "C" fn start(multiboot2_magic: u32, multiboot2_addr: *const BootInfor
     info!("Starting scheduler");
     apic().start_timer(10);
 
-
     // loop {
     //     info!("System time: {}", sys_get_system_time());
     // }

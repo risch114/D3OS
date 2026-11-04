@@ -19,6 +19,6 @@ pub mod sys_system_info;
 pub mod sys_logger;
 pub mod sys_shm;
 pub mod sys_ipc;
-
+pub mod sys_tmp;
 
 pub mod syscall_dispatcher;

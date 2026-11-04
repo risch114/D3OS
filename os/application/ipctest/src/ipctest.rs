@@ -16,6 +16,7 @@ use ipc::ipc_message::{IpcMessageData, IpcMessageType, IpcMessageWrapper};
 use ipc::ipc_error::IpcError;
 use runtime::*;
 use syscall::syscall;
+use terminal::KeyCode::I;
 use terminal::println;
 use uuid::Uuid;
 
@@ -40,21 +41,31 @@ pub fn main() {
 
     let command = args.get(1).unwrap();
 
-    if command == "start" {
+    if command == "send" {
+
+        if args.len() < 3 {
+            return;
+        }
+
+        let res = send_msg_from_args(&args[2..]);
+
+        println!("{:?}", res);
+
+    } else if command == "start" {
 
         let mut args_receive = Vec::new();
-        args_receive.push("receive");
+        args_receive.push("start_receive");
         thread::start_application("ipctest", args_receive);
 
         thread::sleep(1_000);
 
         let mut args_send = Vec::new();
-        args_send.push("send");
+        args_send.push("start_send");
         args.iter().skip(2).for_each(|s| args_send.push(s));
         thread::start_application("ipctest", args_send);
 
         return;
-    } else if command == "send" {
+    } else if command == "start_send" {
 
         let args_numbers: Vec<_> = args.iter().skip(2)
             .map(|s| str::parse::<usize>(&s))
@@ -67,7 +78,7 @@ pub fn main() {
             Ok(_) => println!("Send message successfully"),
             Err(err) => println!("Error sending message: {:?}", err),
         }
-    } else if command == "receive" {
+    } else if command == "start_receive" {
         ipc::register_ipc_endpoint("ipctest_recv");
         loop {
             match ipc::receive("ipctest_recv") {
@@ -479,5 +490,44 @@ pub struct MyStruct {
 impl Display for MyStruct {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "( a: {}, b: {}, c: {} )", self.a, self.b, self.c)
+    }
+}
+
+/// send message from string args, starting with the service_name at index 0 \
+/// `args` needs to be at least 1 element
+fn send_msg_from_args(args: &[String]) -> Result<usize, IpcError> {
+
+    let service_name = args.get(0).unwrap();
+    let msg_name = args.get(1).cloned().unwrap_or("default".to_string());
+    let msg_data_type = args.get(2).map(|s| s.as_str().into()).unwrap_or(IpcMessageType::Empty);
+
+    match msg_data_type {
+        IpcMessageType::Usize | IpcMessageType::UsizeSlice => {
+            let content: Vec<usize> = args[3..].iter().map(|arg| arg.parse().unwrap_or_default()).collect();
+            ipc::send(service_name, &msg_name, content.as_slice())
+        },
+        IpcMessageType::Isize | IpcMessageType::IsizeSlice => {
+            let content: Vec<isize> = args[3..].iter().map(|arg| arg.parse().unwrap_or_default()).collect();
+            ipc::send(service_name, &msg_name, content.as_slice())
+        },
+        IpcMessageType::I32 | IpcMessageType::I32Slice => {
+            let content: Vec<i32> = args[3..].iter().map(|arg| arg.parse().unwrap_or_default()).collect();
+            ipc::send(service_name, &msg_name, content.as_slice())
+        },
+        IpcMessageType::F64 | IpcMessageType::F64Slice => {
+            let content: Vec<f64> = args[3..].iter().map(|arg| arg.parse().unwrap_or_default()).collect();
+            ipc::send(service_name, &msg_name, content.as_slice())
+        },
+        IpcMessageType::Empty => ipc::send_empty(service_name, &msg_name),
+        IpcMessageType::Raw => {
+            ipc::send(service_name, &msg_name, args.get(3).map(|s| s.as_bytes()).unwrap_or(&[]))
+        },
+        IpcMessageType::String => {
+            ipc::send(service_name, &msg_name, args.get(3).unwrap_or(&String::new()))
+        },
+        IpcMessageType::Struct => {
+            unimplemented!("how would structs work with rust? (missing runtime reflection)");
+        },
+        _ => ipc::send_empty(service_name, &msg_name),
     }
 }

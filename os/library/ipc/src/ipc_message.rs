@@ -42,6 +42,26 @@ impl From<IpcMessageData> for IpcMessageType {
     }
 }
 
+impl From<&str> for IpcMessageType {
+    fn from(value: &str) -> Self {
+        match value {
+            "Empty" | "empty" | "EMPTY" => Self::Empty,
+            "Raw" | "raw" | "RAW" => Self::Raw,
+            "Usize" | "usize" | "USIZE" => Self::Usize,
+            "UsizeSlice" | "usizeslice" | "USIZESLICE" => Self::UsizeSlice,
+            "Isize" | "isize" | "ISIZE" => Self::Isize,
+            "IsizeSlice" | "isizeslice" | "ISIZESLICE" => Self::IsizeSlice,
+            "I32" | "i32" => Self::I32,
+            "I32Slice" | "i32slice" | "I32SLICE" => Self::I32Slice,
+            "F64" | "f64" => Self::F64,
+            "F64Slice" | "f64slice" | "F64SLICE" => Self::F64Slice,
+            "String" | "string" | "STRING" => Self::String,
+            "Struct" | "struct" | "STRUCT" => Self::Struct,
+            _ => Self::Raw,
+        }
+    }
+}
+
 /// This enum contains the actual data to be send. \
 /// We use an enum to allow the receiver to distinguish different message data types using a Rust `match` statement.
 #[derive(Clone, Copy, PartialEq)]
