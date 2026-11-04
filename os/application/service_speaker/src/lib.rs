@@ -22,25 +22,22 @@ pub fn main() {
 
         let endpoint_name = "svc_speaker";
         
-        ipc::register_ipc_endpoint(endpoint_name);
+        let _res = ipc::register_ipc_endpoint(endpoint_name);
     
         loop {
     
             let rec = ipc::receive_blocking(endpoint_name, 5000);
-    
-            match rec {
-                Ok(msg_wrapper) => {
-                    let msg = msg_wrapper.msg();
-                    match msg.name().as_str_unchecked() {
-                        "play" | "Play" | "PLAY" => {
-                            if let Ok(data) = msg.data_as_usize_slice() {
-                                syscall(syscall::SystemCall::SpeakerPlaySound, &[*data.get(0).unwrap_or(&0), *data.get(1).unwrap_or(&0)]);
-                            }
-                        },
-                        _ => {},
-                    }
-                },
-                Err(_) => {},
+            
+            if let Ok(msg_wrapper) = rec {
+                let msg = msg_wrapper.msg();
+                match msg.name().as_str_unchecked() {
+                    "play" | "Play" | "PLAY" => {
+                        if let Ok(data) = msg.data_as_usize_slice() {
+                            syscall(syscall::SystemCall::SpeakerPlaySound, &[*data.get(0).unwrap_or(&0), *data.get(1).unwrap_or(&0)]);
+                        }
+                    },
+                    _ => {},
+                }
             }
             
             concurrent::thread::sleep(200);

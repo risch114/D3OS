@@ -5,8 +5,6 @@ version = "0.1.0"
 authors = ["Richard Schweitzer <risch114@uni-duesseldorf.de>"]
 
 [lib]
-crate-type = ["staticlib"]
-path = "src/speaker.rs"
 test = false
 doctest = false
 bench = false
