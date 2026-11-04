@@ -19,6 +19,12 @@ macro_rules! data_as_any_number {
     };
 }
 
+macro_rules! data_slice_as_any_slice {
+    ($data_slice:expr, $data_len:expr, $out_type:ty) => (
+        core::slice::from_raw_parts($data_slice.as_ptr() as *const $out_type, $data_len / size_of::<$out_type>())
+    );
+}
+
 impl IpcMessage {
     
     pub fn data_as_usize(&self) -> Result<usize, &IpcMessageData> {
@@ -86,6 +92,7 @@ impl IpcMessage {
         match self.data() {
             IpcMessageData::UsizeSlice { data, size } => Ok(data[..*size].as_ref()),
             IpcMessageData::Usize(n) => Ok(core::array::from_ref(n)),
+            IpcMessageData::Raw { data, size } => Ok(unsafe { data_slice_as_any_slice!(data, *size, usize) }),
             _ => Err(self.data())
         }
     }
@@ -94,6 +101,7 @@ impl IpcMessage {
         match self.data() {
             IpcMessageData::IsizeSlice { data, size } => Ok(data[..*size].as_ref()),
             IpcMessageData::Isize(n) => Ok(core::array::from_ref(n)),
+            IpcMessageData::Raw { data, size } => Ok(unsafe { data_slice_as_any_slice!(data, *size, isize) }),
             _ => Err(self.data())
         }
     }
@@ -102,6 +110,7 @@ impl IpcMessage {
         match self.data() {
             IpcMessageData::I32Slice { data, size } => Ok(data[..*size].as_ref()),
             IpcMessageData::I32(n) => Ok(core::array::from_ref(n)),
+            IpcMessageData::Raw { data, size } => Ok(unsafe { data_slice_as_any_slice!(data, *size, i32) }),
             _ => Err(self.data())
         }
     }
@@ -110,6 +119,7 @@ impl IpcMessage {
         match self.data() {
             IpcMessageData::F64Slice { data, size } => Ok(data[..*size].as_ref()),
             IpcMessageData::F64(n) => Ok(core::array::from_ref(n)),
+            IpcMessageData::Raw { data, size } => Ok(unsafe { data_slice_as_any_slice!(data, *size, f64) }),
             _ => Err(self.data())
         }
     }
