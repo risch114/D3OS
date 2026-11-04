@@ -10,12 +10,8 @@ use ipc::ipc_error::IpcError;
 use runtime::*;
 use terminal::println;
 
-static LOGGER: logger::Logger = logger::Logger::new();
-
 #[unsafe(no_mangle)]
 pub fn main() {
-
-    log::set_logger(&LOGGER).map(|_| log::set_max_level(log::LevelFilter::Debug));
 
     let args: Vec<String> = env::args().collect();
 
@@ -138,7 +134,7 @@ fn send<T: IpcMessageContent>(service_name: &str, msg_name: &str, content: T, ti
         let res = ipc::send(service_name, msg_name, content);
         match res {
             Ok(_) => {
-                println!("msg send successfully");
+                println!("msg sent successfully");
             },
             Err(err) => println!("{:?}", err),
         };

@@ -673,15 +673,9 @@ dependencies = [
 name = "ipcsend"
 version = "0.1.0"
 dependencies = [
- "concurrent",
- "d3os",
  "ipc",
- "log",
- "logger",
  "runtime",
- "syscall",
  "terminal",
- "uuid",
 ]
 
 [[package]]
