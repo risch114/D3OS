@@ -16,7 +16,7 @@ use x86_64::{PrivilegeLevel, VirtAddr};
 use crate::process::core_local_storage::init_tss_cls;
 use crate::syscall::sys_concurrent::sys_thread_block;
 use crate::syscall::sys_ipc::{sys_ipc_receive_blocking, sys_ipc_register, sys_ipc_delete, sys_ipc_send};
-use crate::syscall::sys_tmp::sys_speaker_play;
+use crate::syscall::sys_tmp::{sys_port_out, sys_port_in};
 use log::info;
 use x86_64::registers::rflags::RFlags;
 
@@ -155,7 +155,8 @@ impl SyscallTable {
                 sys_ipc_send as *const _,
                 sys_ipc_receive_blocking as *const _,
                 sys_ipc_delete as *const _,
-                sys_speaker_play as *const _,
+                sys_port_out as *const _,
+                sys_port_in as *const _,
             ],
         }
     }

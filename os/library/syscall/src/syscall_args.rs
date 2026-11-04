@@ -37,6 +37,12 @@ impl SyscallArgs for usize {
     }
 }
 
+impl SyscallArgs for u16 {
+    fn arg(&self, index: usize) -> usize {
+        if index == 0 { *self as usize } else { 0 }
+    }
+}
+
 impl<T: Sized> SyscallArgs for *const T {
     fn arg(&self, index: usize) -> usize {
         if index == 0 { *self as usize } else { 0 }

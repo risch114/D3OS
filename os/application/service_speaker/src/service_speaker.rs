@@ -2,14 +2,15 @@
 
 extern crate alloc;
 
+mod speaker;
+
 use alloc::{string::String, vec::Vec};
 use alloc::vec;
-use concurrent::{process, thread};
+use concurrent::thread;
 use ipc::ipc_message::IpcMessageWrapper;
 use runtime::env::args;
 #[allow(unused_imports)]
 use runtime::*;
-use syscall::syscall;
 
 #[unsafe(no_mangle)]
 pub fn main() {
@@ -33,7 +34,9 @@ pub fn main() {
                 match msg.name().as_str_unchecked() {
                     "play" | "Play" | "PLAY" => {
                         if let Ok(data) = msg.data_as_usize_slice() {
-                            syscall(syscall::SystemCall::SpeakerPlaySound, &[*data.get(0).unwrap_or(&0), *data.get(1).unwrap_or(&0)]);
+                            let freq = *data.get(0).unwrap_or(&8);
+                            let dura = *data.get(1).unwrap_or(&1000);
+                            speaker::play(freq, dura);
                         }
                     },
                     _ => {},
