@@ -55,7 +55,7 @@ pub fn main() {
     }
 
     let Some(service_name) = args_flags.iter()
-        .find(|(flag, _)| *flag == "svc" || *flag == "s")
+        .find(|(flag, _)| *flag == "service" || *flag == "svc" || *flag == "s")
         .map(|(_, value)| *value)
         .flatten()
         else {
@@ -76,7 +76,7 @@ pub fn main() {
         .unwrap_or(IpcMessageType::Raw);
 
     let timeout = args_flags.iter()
-        .find(|(flag, _)| *flag == "type" || *flag == "t")
+        .find(|(flag, _)| *flag == "timeout")
         .map(|(_, value)| *value)
         .flatten()
         .map(|s| s.parse().ok())

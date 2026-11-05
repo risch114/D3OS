@@ -1,0 +1,26 @@
+[package]
+edition = "2024"
+name = "service"
+version = "0.1.0"
+authors = ["Richard Schweitzer <risch114@uni-duesseldorf.de>"]
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/service.rs"
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+# Local dependencies
+runtime = { path = "../../library/runtime" }
+concurrent = { path = "../../library/concurrent" }
+ipc = { path = "../../library/ipc" }
+syscall = { path = "../../library/syscall" }
+logger = { path = "../../library/logger" }
+terminal = { path = "../../library/terminal" }
+
+# external dependencies
+spin = "0.12"
+log = "0.4.26"
+uuid = { version = "1.23.1", default-features = false, features = ["v7"] }

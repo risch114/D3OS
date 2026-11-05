@@ -33,6 +33,7 @@ members = [
     "os/application/avxtest",
     "os/application/ipctest",
     "os/application/ipcsend",
+    "os/application/service",
     "os/application/service_speaker",
 ]
 

@@ -163,4 +163,30 @@ pub const APPLICATION_REGISTRY: &[Application] = &[
         single_value: &[],
         key_value_pair: &[],
     },
+    Application {
+        namespace: "ipcsend",
+        single_value: &[
+            "<value>",
+        ],
+        key_value_pair: &[
+            ("-s", &["<service_name>"]),
+            ("-svc", &["<service_name>"]),
+            ("-service", &["<service_name>"]),
+            ("-n", &["<message_name>"]),
+            ("-name", &["<message_name>"]),
+            ("-t", &["usize", "isize", "i32", "f64", "raw", "empty", "string"]),
+            ("-type", &["usize", "isize", "i32", "f64", "raw", "empty", "string"]),
+            ("-timeout", &["<timeout_ms>"]),
+        ],
+    },
+    Application {
+        namespace: "service",
+        single_value: &[
+            "list",
+        ],
+        key_value_pair: &[
+            ("start", &["<service_name>"]),
+            ("stop", &["<service_name>"]),
+        ],
+    },
 ];

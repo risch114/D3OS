@@ -14,7 +14,7 @@ use x86_64::structures::gdt::SegmentSelector;
 use x86_64::{PrivilegeLevel, VirtAddr};
 
 use crate::process::core_local_storage::init_tss_cls;
-use crate::syscall::sys_concurrent::sys_thread_block;
+use crate::syscall::sys_concurrent::{sys_process_kill, sys_thread_block};
 use crate::syscall::sys_ipc::{sys_ipc_receive_blocking, sys_ipc_register, sys_ipc_delete, sys_ipc_send};
 use crate::syscall::sys_tmp::{sys_port_out, sys_port_in};
 use log::info;
@@ -105,6 +105,7 @@ impl SyscallTable {
                 sys_process_execute_binary as *const _,
                 sys_process_id as *const _,
                 sys_process_exit as *const _,
+                sys_process_kill as *const _,
                 sys_process_count as *const _,
                 sys_process_status as *const _,
                 sys_thread_create as *const _,

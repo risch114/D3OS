@@ -32,6 +32,7 @@ pub enum SystemCall {
     ProcessExecuteBinary,
     ProcessId,
     ProcessExit,
+    ProcessKill,
     ProcessCount,
     ProcessStatus,
     ThreadCreate,

@@ -8,6 +8,7 @@
 */
 use alloc::{boxed::Box, collections::btree_map::BTreeMap};
 use alloc::vec::Vec;
+use uuid::Uuid;
 use core::arch::asm;
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -15,6 +16,8 @@ use chrono::TimeDelta;
 use time::systime;
 use spin::Mutex;
 use syscall::{SystemCall, syscall,return_vals::Errno};
+
+use crate::process::Process;
 
 static NEXT_FUNCTION_ID: AtomicUsize = AtomicUsize::new(0);
 /// These are functions to be spawned in new threads.
@@ -49,6 +52,13 @@ impl Thread {
     pub fn start_time(&self) -> TimeDelta {
         let thread_env = thread_environment();
         thread_env.start_time
+    }
+
+    pub fn process(&self) -> Process {
+        let mut pid: u128 = 0;
+        syscall(SystemCall::ProcessId, &[ptr::from_mut(&mut pid) as usize, self.id])
+            .expect("failed to get process id");
+        Process::new(Uuid::from_u128(pid))
     }
 }
 

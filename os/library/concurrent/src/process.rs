@@ -10,23 +10,28 @@ use core::ptr;
 use syscall::{SystemCall, return_vals::Errno, syscall};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy)]
 pub struct Process {
     id: Uuid,
 }
 
 impl Process {
-    const fn new(id: Uuid) -> Self {
+    pub const fn new(id: Uuid) -> Self {
         Self { id }
     }
 
     pub const fn id(&self) -> Uuid {
         self.id
     }
+
+    pub fn kill(&self) -> Result<usize, syscall::return_vals::Errno> {
+        syscall(SystemCall::ProcessKill, &[ptr::from_ref(&self.id) as usize])
+    }
 }
 
 pub fn current() -> Process {
     let mut id: u128 = 0;
-    syscall(SystemCall::ProcessId, &[ptr::from_mut(&mut id) as usize])
+    syscall(SystemCall::ProcessId, &[ptr::from_mut(&mut id) as usize, 0])
         .expect("failed to get process id");
     Process::new(Uuid::from_u128(id))
 }

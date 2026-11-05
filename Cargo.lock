@@ -1465,6 +1465,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "service"
+version = "0.1.0"
+dependencies = [
+ "concurrent",
+ "ipc",
+ "log",
+ "logger",
+ "runtime",
+ "spin 0.12.2",
+ "syscall",
+ "terminal",
+ "uuid",
+]
+
+[[package]]
 name = "service_speaker"
 version = "0.1.0"
 dependencies = [

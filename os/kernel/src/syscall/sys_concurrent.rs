@@ -13,21 +13,45 @@ use alloc::format;
 use alloc::slice;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use uuid::Uuid;
 use core::ptr::slice_from_raw_parts;
 use core::str::from_utf8;
 use syscall::return_vals::{self, Errno};
 use x86_64::VirtAddr;
 
-pub extern "sysv64" fn sys_process_id(destination: *mut u128) -> isize {
-    unsafe { destination.write(
-        process_manager().read().current_process().id().as_u128()
-    ) };
-    0
+pub extern "sysv64" fn sys_process_id(destination: *mut u128, tid: usize) -> isize {
+    let process_id = if tid == 0 {
+        Some(process_manager().read().current_process().id().as_u128())
+    } else {
+        if let Some(thread) = scheduler().thread(tid) {
+            Some(thread.process().id().as_u128())
+        } else {
+            None
+        }
+    };
+    match process_id {
+        Some(pid) => {
+            unsafe { destination.write(pid)};
+            0
+        },
+        None => -1,
+    }
 }
 
 pub extern "sysv64" fn sys_process_exit() -> ! {
     scheduler().current_thread().process().exit();
-    scheduler().exit();
+    scheduler().exit()
+}
+
+pub extern "sysv64" fn sys_process_kill(target_pid_ptr: *const Uuid) {
+    let target_pid = unsafe { *target_pid_ptr };
+    let current_process = scheduler().current_thread().process();
+    if target_pid == current_process.id() {
+        drop(current_process);
+        sys_process_exit();
+    } else {
+        process_manager().write().kill(target_pid);
+    }
 }
 
 pub extern "sysv64" fn sys_process_count() -> isize {
