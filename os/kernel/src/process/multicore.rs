@@ -107,7 +107,7 @@ impl MessageItem {
 
 
 /// Commands that a core can request another core to perform locally
-#[derive(Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum MessageCmd {
     /// "Thread with `tid` exited somewhere; if you have join-waiters for it locally, wake them."
     JoinTargetExited { tid: usize },
