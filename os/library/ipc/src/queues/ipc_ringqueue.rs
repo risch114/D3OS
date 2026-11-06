@@ -85,6 +85,10 @@ impl<const S: usize> IpcQueue for IpcRingQueue<IpcMessage, S> {
             }
         }
     }
+    
+    fn clear(&self) {
+        self.ringqueue.clear();
+    }
 }
 
 impl<'a, const S: usize> IpcMessageWrapper for RingqueueItemWrapper<'a, IpcMessage, S> {

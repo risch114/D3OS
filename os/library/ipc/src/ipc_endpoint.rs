@@ -1,74 +1,79 @@
 use core::sync::atomic::AtomicBool;
 
+use alloc::vec::Vec;
 use d3os::const_string::ConstString;
-use spin::RwLock;
-use syscall::syscall;
-use syscall::SystemCall;
+use spin::Mutex;
 
 use crate::queues::IpcQueue;
 use crate::queues::IpcQueueType;
-use crate::{USER_SPACE_MAILBOX_START, ipc_error::IpcError};
+use crate::ipc_error::IpcError;
 
-const ENDPOINT_NAME_LEN: usize = 64;
-const ENDPOINT_NUM: usize = 8;
+pub const ENDPOINT_NAME_LEN: usize = 64;
+pub const ENDPOINT_NUM: usize = 8;
 
-static ENDPOINTS_INIT: AtomicBool = AtomicBool::new(false);
+pub static ENDPOINTS_INIT: AtomicBool = AtomicBool::new(false);
+
+pub struct IpcEndpoint {
+    pub name: Mutex<ConstString<ENDPOINT_NAME_LEN>>,
+    pub queue: IpcQueueType,
+}
+
+impl IpcEndpoint {
+    pub fn new() -> Self {
+        Self { name: Mutex::new(ConstString::new()), queue: IpcQueueType::new() }
+    }
+}
 
 pub struct IpcEndpoints {
-    endpoints: [RwLock<ConstString<ENDPOINT_NAME_LEN>>; ENDPOINT_NUM],
-    queues: [IpcQueueType; ENDPOINT_NUM]
+    endpoints: [IpcEndpoint; ENDPOINT_NUM],
+    free_slots: Mutex<Vec<usize>>,
 }
 
 impl IpcEndpoints {
     pub fn new() -> Self {
+        let mut free_slots = Vec::with_capacity(ENDPOINT_NUM);
+        for i in (0..ENDPOINT_NUM).rev() {
+            free_slots.push(i);
+        }
         Self {
-            endpoints: [const { RwLock::new(ConstString::new()) }; _],
-            queues: core::array::from_fn(|_| IpcQueueType::new())
+            endpoints: core::array::from_fn(|_| IpcEndpoint::new()),
+            free_slots: Mutex::new(free_slots),
         }
     }
-    pub fn get(&self, name: &str) -> Option<&IpcQueueType> {
-        let pos = self.endpoints.iter().position(|endpoint_name| endpoint_name.read().as_str_unchecked() == name)?;
-        Some(&self.queues[pos])
+
+    pub fn find(&self, name: &str) -> Option<&IpcEndpoint> {
+        let pos = self.endpoints.iter().position(|e| e.name.lock().as_str_unchecked() == name)?;
+        Some(&self.endpoints[pos])
     }
-    pub fn try_register(&self, svc_name: &str) -> Result<usize, IpcError> {
 
-        let opt_duplicate = self.endpoints.iter().find(|name| name.read().as_str_unchecked() == svc_name);
+    pub fn try_register(&self, name: &str) -> Result<&IpcEndpoint, IpcError> {
 
-        if opt_duplicate.is_some() {
+        if self.find(name).is_some() {
             return Err(IpcError::EndpointAlreadyExists);
         }
 
-        match self.endpoints.iter().position(|name| name.read().is_empty()) {
-            Some(pos) => {
-                self.endpoints[pos].write().set(svc_name);
-                Ok(pos)
+        match self.free_slots.lock().pop() {
+            Some(free_slot) => {
+                self.endpoints[free_slot].name.lock().set(name);
+                Ok(&self.endpoints[free_slot])
             },
             None => Err(IpcError::Full),
         }
     }
-}
 
-/// registers an endpoint with the given name \
-/// returns an error if the endpoint already exists
-pub fn register_ipc_endpoint(endpoint_name: &str) -> Result<usize, IpcError> {
-    // TODO what happens when we register multiple endpoints / multiple services for this endpoint
+    pub fn try_remove(&self, name: &str) -> Result<usize, IpcError> {
 
-    let endpoints_ptr = USER_SPACE_MAILBOX_START as *mut IpcEndpoints;
-    // if queue is not initialized, create new queue
-    if ENDPOINTS_INIT.compare_exchange(false, true, core::sync::atomic::Ordering::Relaxed, core::sync::atomic::Ordering::Relaxed).is_ok() {
-        unsafe { endpoints_ptr.write(IpcEndpoints::new()) };
+        let find_pos = self.endpoints.iter().position(|e| e.name.lock().as_str_unchecked() == name);
+
+        let Some(pos) = find_pos else {
+            return Err(IpcError::EndpointNotFound);
+        };
+
+        self.endpoints[pos].name.lock().clear();
+        self.endpoints[pos].queue.clear();
+
+        self.free_slots.lock().push(pos);
+
+        Ok(pos)
     }
-
-    // try creating a new endpoint
-    unsafe { (*endpoints_ptr).try_register(endpoint_name)?; }
-
-    let name_ptr = endpoint_name.as_ptr();
-    let name_len = endpoint_name.len();
-    IpcError::convert_syscall_result(syscall(SystemCall::IpcRegister, &[name_ptr as usize, name_len]))
-}
-
-pub fn remove_ipc_endpoint(svc_name: &str) -> Result<usize, IpcError> {
-    let name_ptr = svc_name.as_ptr();
-    let name_len = svc_name.len();
-    IpcError::convert_syscall_result(syscall(SystemCall::IpcDelete, &[name_ptr as usize, name_len]))
 }

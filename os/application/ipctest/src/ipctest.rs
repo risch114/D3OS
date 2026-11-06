@@ -79,7 +79,7 @@ pub fn main() {
             Err(err) => println!("Error sending message: {:?}", err),
         }
     } else if command == "start_receive" {
-        ipc::register_ipc_endpoint("ipctest_recv");
+        ipc::register_ipc_endpoint("ipctest", "ipctest_recv");
         loop {
             match ipc::receive("ipctest_recv") {
                 Ok(msg_wrapper) => {
@@ -100,7 +100,7 @@ pub fn main() {
         let endpoint_name = "ipctest_pong";
 
         // register self as pong
-        ipc::register_ipc_endpoint(endpoint_name);
+        ipc::register_ipc_endpoint("ipctest_pingpong", endpoint_name);
 
         // start ping
         thread::start_application("ipctest", vec!["pingpong_ping"]);
@@ -159,7 +159,7 @@ pub fn main() {
 
         let limit = 50;
 
-        ipc::register_ipc_endpoint("ipctest_recv");
+        ipc::register_ipc_endpoint("ipctest_loop", "ipctest_recv");
 
         let mut args_send = Vec::new();
         args_send.push("loop_send");
@@ -188,7 +188,7 @@ pub fn main() {
         }
     } else if command == "loop_send" {
 
-        ipc::register_ipc_endpoint("ipctest_send");
+        ipc::register_ipc_endpoint("ipctest_loop", "ipctest_send");
 
         let mut i = 1 as usize;
         let mut errors = 0;
@@ -217,7 +217,7 @@ pub fn main() {
         }
     } else if command == "struct" {
         
-        ipc::register_ipc_endpoint("ipctest_struct_recv");
+        ipc::register_ipc_endpoint("ipctest_struct", "ipctest_struct_recv");
         thread::start_application("ipctest", vec!["struct_send"]);
 
         thread::sleep(1500);
@@ -244,7 +244,7 @@ pub fn main() {
         ipc::send_struct("ipctest_struct_recv", "test", &my_struct);
     } else if command == "contention" || command == "c" {
         
-        ipc::register_ipc_endpoint("ipctest_contention_recv");
+        ipc::register_ipc_endpoint("ipctest_contention", "ipctest_contention_recv");
 
         let num_child_processes = 4;
 
@@ -325,7 +325,7 @@ pub fn main() {
         }
     } else if command == "mathserver" || command == "ms" {
 
-        ipc::register_ipc_endpoint("mathserver_ctrl");
+        ipc::register_ipc_endpoint("ipctest_mathserver", "mathserver_ctrl");
 
         let math_fns: [(&str, fn(f64, f64) -> f64); 4] = [
             ("mathserver_add", |i1, i2| i1 + i2),
@@ -335,7 +335,7 @@ pub fn main() {
         ];
 
         for (endpoint_name, _) in math_fns {
-            ipc::register_ipc_endpoint(endpoint_name);
+            ipc::register_ipc_endpoint("ipctest_mathserver", endpoint_name);
         }
 
         let num_child_processes = 2;

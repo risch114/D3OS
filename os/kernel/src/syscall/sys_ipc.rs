@@ -1,33 +1,67 @@
 use core::str;
 
 use alloc::{format, slice};
-use ipc::{IpcEndpoints, IpcRcvBlockingSyscallParams, IpcSendSyscallParams, MESSAGE_DATA_SIZE};
+use d3os::copy_from_slice_sizechecked;
+use ipc::ipc_endpoint::IpcEndpoint;
+use ipc::{IpcRcvBlockingSyscallParams, IpcSendSyscallParams, MESSAGE_DATA_SIZE};
 use ipc::queues::IpcQueue;
 use ipc::ipc_error::IpcError;
 use log::error;
 use naming::shared_types::OpenOptions;
-use syscall::return_vals::{self, SyscallResult};
+use syscall::return_vals::{self, Errno, SyscallResult};
 use uuid::Uuid;
 
 use crate::naming::api as nameservice;
-use crate::naming::servicefs::ServiceObject;
+use crate::naming::servicefs::Endpoint;
 use crate::{process::core_local_storage::scheduler, sync::wait_queue::WaitQueue, timer};
 
 static WAIT_QUEUE: WaitQueue = WaitQueue::new();
 
-pub extern "sysv64" fn sys_ipc_register(name_ptr: *const u8, name_len: usize) -> isize {
-    
-    let bytes = unsafe { slice::from_raw_parts(name_ptr, name_len) };
-    let name = str::from_utf8(bytes).unwrap();
+pub extern "sysv64" fn sys_ipc_register(service_name_ptr: *const &str, endpoint_ptr: *const IpcEndpoint) -> isize {
 
-    // create a file in /svc/<name> to register this process' ipc endpoint
-    match nameservice::open(&format!("/svc/{}", name), OpenOptions::CREATE) {
+    let service_name = unsafe { *service_name_ptr };
+    let endpoint = unsafe { &*endpoint_ptr };
+
+    // try create a directory in /svc/<name> to register the service
+    let fh = match nameservice::open(&format!("/svc/{}", service_name), OpenOptions::CREATE & OpenOptions::DIRECTORY) {
         Ok(fh) => {
-            nameservice::close(fh);
-            return_vals::convert_syscall_result_to_ret_code(SyscallResult::Ok(0))
+            fh
         }
-        Err(err) => return_vals::convert_syscall_result_to_ret_code(SyscallResult::Err(err))
+        Err(err) => {
+            if err == Errno::EEXIST {
+                // service already exists, open
+                match nameservice::open(&format!("/svc/{}", service_name), OpenOptions::READONLY & OpenOptions::DIRECTORY) {
+                    Ok(fh) => {
+                        fh
+                    },
+                    Err(err) => {
+                        return return_vals::convert_syscall_result_to_ret_code(SyscallResult::Err(err));
+                    },
+                }
+            } else {
+                return return_vals::convert_syscall_result_to_ret_code(SyscallResult::Err(err));
+            }
+        }
+    };
+
+    nameservice::close(fh);
+
+    // TODO: check if endpoint already exists
+
+    match nameservice::open(&format!("/svc/{}/{}", service_name, endpoint.name.lock().as_str_unchecked()), OpenOptions::CREATE & OpenOptions::DIRECTORY) {
+        Ok(fh) => {
+            let endpoint_addr_bytes = usize::to_le_bytes(endpoint_ptr as usize);
+            nameservice::write(fh, &endpoint_addr_bytes);
+            nameservice::close(fh);
+        },
+        Err(err) => {
+            return return_vals::convert_syscall_result_to_ret_code(SyscallResult::Err(err));
+        },
     }
+
+    // now we register the endpoint
+    nameservice::close(fh);
+    return_vals::convert_syscall_result_to_ret_code(SyscallResult::Ok(0))
 }
 
 pub extern "sysv64" fn sys_ipc_delete(name_ptr: *const u8, name_len: usize) -> isize {
@@ -46,12 +80,12 @@ pub extern "sysv64" fn sys_ipc_delete(name_ptr: *const u8, name_len: usize) -> i
 }
 
 pub fn remove_endpoints_for_process(process_id: &Uuid) {
-    if let Ok(svc_fh) = nameservice::open("/svc", OpenOptions::DIRECTORY) {
+    if let Ok(svc_dir_fh) = nameservice::open("/svc", OpenOptions::DIRECTORY) {
         // get all services
-        if let Ok(list) = nameservice::list_dir(svc_fh) {
-            for (_, name) in list {
-                if let Ok(fh) = nameservice::open(&format!("/svc/{}", name), OpenOptions::READWRITE) {
-                    let mut buf = [0_u8; core::mem::size_of::<ServiceObject>()];
+        if let Ok(list) = nameservice::list_dir(svc_dir_fh) {
+            for (svc_dir, svc_name) in list {
+                if let Ok(fh) = nameservice::open(&format!("/svc/{}", svc_name), OpenOptions::READWRITE) {
+                    let mut buf = [0_u8; core::mem::size_of::<Endpoint>()];
                     nameservice::read(fh, &mut buf);
                     let service = unsafe { &(*(buf.as_ptr() as *const ServiceObject)).service };
                     if service.owning_pid == *process_id {

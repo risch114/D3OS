@@ -34,6 +34,7 @@ pub trait IpcQueue {
     /// this is abstraction is used to avoid calling the scheduler directly, as this can only be done from the kernel;
     /// this solution avoids the direct dependency of this library on the D3OS kernel
     fn unblock_waiting<F: Fn(Uuid, usize) -> bool>(&self, unblock_fn: F);
+    fn clear(&self);
 }
 
 /// message wrapper which takes ownership of the message (i.e. copies the message)

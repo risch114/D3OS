@@ -143,3 +143,9 @@ impl <const S: usize> PartialEq<str> for ConstString<S> {
         self.as_str_unchecked() == other
     }
 }
+
+impl <const S: usize> PartialEq<&str> for ConstString<S> {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str_unchecked() == *other
+    }
+}

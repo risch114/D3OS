@@ -71,7 +71,9 @@ impl<T: Copy + Default, const S: usize> Ringqueue<T, S> {
             // return a ref to the data in the used slot
             if let Some(_guard) = self.data[used_slot].try_read() {
                 let ptr = self.data[used_slot].as_mut_ptr();
-                return Some(unsafe { ptr.read() }); // copy here
+                let elem = unsafe { ptr.read() }; // copy here
+                self.free_slots.push(used_slot);
+                return Some(elem);
             }
         }
 
@@ -92,6 +94,12 @@ impl<T: Copy + Default, const S: usize> Ringqueue<T, S> {
         }
 
         None
+    }
+
+    pub fn clear(&self) {
+        while let Some(_elem) = self.pop() {
+            
+        }
     }
 
     /// return a ref to the data in the given slot \

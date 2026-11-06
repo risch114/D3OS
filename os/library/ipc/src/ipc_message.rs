@@ -4,7 +4,8 @@ use alloc::format;
 use alloc::string::String;
 use uuid::Uuid;
 
-use crate::{ENDPOINT_NAME_LEN, MESSAGE_DATA_SIZE, MESSAGE_NAME_LEN};
+use crate::{MESSAGE_DATA_SIZE, MESSAGE_NAME_LEN};
+use crate::ipc_endpoint::ENDPOINT_NAME_LEN;
 use d3os::{array_from_slice, copy_from_slice_sizechecked};
 use d3os::const_string::ConstString;
 

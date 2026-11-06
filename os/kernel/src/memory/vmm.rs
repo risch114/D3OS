@@ -535,6 +535,11 @@ impl VirtualAddressSpace {
         self.get_phys(ptr as u64).map(|phys| phys.as_u64() as *mut T)
     }
 
+    /// Wrapper for manually translating an addr (usize) using this address space
+    pub fn translate_addr(&self, addr: usize) -> Option<usize> {
+        self.get_phys(addr as u64).map(|phys| phys.as_u64() as usize)
+    }
+
     /// Wrapper for manually translating any variable type using this address space
     pub fn translate_any<T, U, F, G>(&self, any: T, to_addr: F, from_addr: G) -> Option<U> where F: Fn(T) -> u64, G: Fn(u64) -> U {
         self.get_phys(to_addr(any)).map(|phys| from_addr(phys.as_u64()))

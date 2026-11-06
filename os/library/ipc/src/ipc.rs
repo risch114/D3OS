@@ -17,7 +17,7 @@ use syscall::{SystemCall, syscall};
 
 use concurrent::{process, thread};
 
-use crate::ipc_endpoint::{IpcEndpoints, register_ipc_endpoint};
+use crate::ipc_endpoint::IpcEndpoints;
 use crate::ipc_message::{IpcMessage, IpcMessageContent, IpcMessageData, IpcMessageType, IpcMessageWrapper};
 use crate::ipc_error::IpcError;
 use crate::queues::IpcQueue;
@@ -30,6 +30,28 @@ pub const MESSAGE_DATA_SIZE: usize = 0x100;
 const MAX_NUM_MESSAGES: usize = 16;
 
 const USER_SPACE_MAILBOX_START: usize = 0x10100000000;
+
+/// registers an endpoint with the given name \
+/// returns an error if the endpoint already exists
+// TODO what happens when we register multiple endpoints / multiple services for this endpoint
+pub fn register_ipc_endpoint(service_name: &str, endpoint_name: &str) -> Result<usize, IpcError> {
+
+    let endpoints_ptr = USER_SPACE_MAILBOX_START as *mut IpcEndpoints;
+    // if queue is not initialized, create new queue
+    if ipc_endpoint::ENDPOINTS_INIT.compare_exchange(false, true, core::sync::atomic::Ordering::Relaxed, core::sync::atomic::Ordering::Relaxed).is_ok() {
+        unsafe { endpoints_ptr.write(IpcEndpoints::new()) };
+    }
+
+    // try creating a new endpoint
+    let endpoint = unsafe { (*endpoints_ptr).try_register(endpoint_name)? };
+    IpcError::convert_syscall_result(syscall(SystemCall::IpcRegister, &[core::ptr::from_ref(&service_name) as usize, core::ptr::from_ref(endpoint) as usize]))
+}
+
+pub fn remove_ipc_endpoint(svc_name: &str) -> Result<usize, IpcError> {
+    let name_ptr = svc_name.as_ptr();
+    let name_len = svc_name.len();
+    IpcError::convert_syscall_result(syscall(SystemCall::IpcDelete, &[name_ptr as usize, name_len]))
+}
 
 pub fn create_msg<T: IpcMessageContent>(content: T) -> IpcMessageData {
     content.to_data()
@@ -146,7 +168,7 @@ pub struct IpcSendSyscallParams {
 pub fn send_internal(target_endpoint: &str, msg_name: &str, msg_type: IpcMessageType, data: &[u8], callback: &str) -> Result<usize, IpcError> {
 
     // register callback endpoint
-    let res = register_ipc_endpoint(callback);
+    let res = register_ipc_endpoint("callback", callback);
 
     // check for relevant error | if the error is that the endpoint already exists, continue
     if let Err(err) = res.as_ref() {
@@ -169,8 +191,8 @@ pub fn send_internal(target_endpoint: &str, msg_name: &str, msg_type: IpcMessage
 
 pub fn receive(endpoint_name: &str) -> Result<impl IpcMessageWrapper + use<>, IpcError> {
     let endpoints = unsafe { (USER_SPACE_MAILBOX_START as *const IpcEndpoints).as_ref_unchecked() };
-    let ipc_queue = endpoints.get(endpoint_name).ok_or(IpcError::EndpointNotFound)?;
-    ipc_queue.receive()
+    let ipc_endpoint = endpoints.find(endpoint_name).ok_or(IpcError::EndpointNotFound)?;
+    ipc_endpoint.queue.receive()
 }
 
 pub fn receive_answer() -> Result<impl IpcMessageWrapper + use<>, IpcError> {
@@ -188,8 +210,8 @@ pub struct IpcRcvBlockingSyscallParams {
 /// will stop waiting after timeout ms
 pub fn receive_blocking(endpoint_name: &str, timeout_ms: usize) -> Result<impl IpcMessageWrapper + use<>, IpcError> {
     let endpoints = unsafe { (USER_SPACE_MAILBOX_START as *const IpcEndpoints).as_ref_unchecked() };
-    let ipc_queue = endpoints.get(endpoint_name).ok_or(IpcError::EndpointNotFound)?;
-    ipc_queue.receive_blocking(timeout_ms)
+    let ipc_endpoint = endpoints.find(endpoint_name).ok_or(IpcError::EndpointNotFound)?;
+    ipc_endpoint.queue.receive_blocking(timeout_ms)
 }
 
 pub fn receive_busy_polling(endpoint_name: &str, timeout_ms: usize, interval_ms: usize) -> Result<impl IpcMessageWrapper + use<>, IpcError> {
