@@ -38,3 +38,21 @@ pub mod const_string;
         }
     };
 }
+
+#[macro_export] macro_rules! any_as_bytes {
+    ($any_ref:expr) => {
+        core::slice::from_raw_parts(core::ptr::from_ref($any_ref) as *const u8, core::mem::size_of_val($any_ref))
+    };
+}
+
+#[macro_export] macro_rules! bytes_as_any {
+    ($bytes:expr) => {
+        &*($bytes.as_ptr() as *const _)
+    };
+    ($bytes:expr; $any_type:ty) => {
+        {
+            debug_assert!($bytes.len() == core::mem::size_of::<$any_type>());
+            &*($bytes.as_ptr() as *const $any_type)
+        }
+    }
+}

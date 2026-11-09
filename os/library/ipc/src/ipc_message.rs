@@ -4,7 +4,7 @@ use alloc::format;
 use alloc::string::String;
 use uuid::Uuid;
 
-use crate::{MESSAGE_DATA_SIZE, MESSAGE_NAME_LEN};
+use crate::{MESSAGE_DATA_SIZE, MESSAGE_NAME_LEN, SERVICE_NAME_LEN};
 use crate::ipc_endpoint::ENDPOINT_NAME_LEN;
 use d3os::{array_from_slice, copy_from_slice_sizechecked};
 use d3os::const_string::ConstString;
@@ -264,16 +264,38 @@ pub struct IpcMessage {
     pub(crate) data: IpcMessageData,
     pub(crate) sender_pid: Uuid,
     pub(crate) sender_tid: usize,
-    pub(crate) callback: ConstString<ENDPOINT_NAME_LEN>,
+    pub(crate) callback: IpcCallback,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IpcCallback {
+    pub(crate) service_name: ConstString<SERVICE_NAME_LEN>,
+    pub(crate) endpoint_name: ConstString<ENDPOINT_NAME_LEN>,
+}
+
+impl IpcCallback {
+    pub fn new() -> Self {
+        Self { service_name: ConstString::new(), endpoint_name: ConstString::new() }
+    }
+    pub fn set(&mut self, callback: (&str, &str)) {
+        self.service_name.set(callback.0);
+        self.endpoint_name.set(callback.1);
+    }
+}
+
+impl From<(&str, &str)> for IpcCallback {
+    fn from(value: (&str, &str)) -> Self {
+        Self { service_name: value.0.into(), endpoint_name: value.1.into() }
+    }
 }
 
 impl IpcMessage {
     #![allow(clippy::missing_safety_doc)]
 
     pub fn new() -> Self {
-        Self { name: ConstString::new(), data: IpcMessageData::Empty, sender_pid: Uuid::nil(), sender_tid: 0, callback: ConstString::new() }
+        Self { name: ConstString::new(), data: IpcMessageData::Empty, sender_pid: Uuid::nil(), sender_tid: 0, callback: IpcCallback::new() }
     }
-    pub fn new_from(name: &str, data: IpcMessageData, sender_pid: Uuid, sender_tid: usize, callback: &str) -> Self {
+    pub fn new_from(name: &str, data: IpcMessageData, sender_pid: Uuid, sender_tid: usize, callback: (&str, &str)) -> Self {
         Self { name: name.into(), data, sender_pid, sender_tid, callback: callback.into() }
     }
 
@@ -319,7 +341,7 @@ impl IpcMessage {
         self.sender_pid = sender_pid;
         self.sender_tid = sender_tid;
     }
-    pub fn set_from_data_bytes(&mut self, name: &str, bytes: &[u8], data_type: IpcMessageType, sender_pid: Uuid, sender_tid: usize, callback: &str) {
+    pub fn set_from_data_bytes(&mut self, name: &str, bytes: &[u8], data_type: IpcMessageType, sender_pid: Uuid, sender_tid: usize, callback: (&str, &str)) {
         self.name.set(name);
         // unsafe copy_from_slice directly into the enum + change discriminant manually may be faster
         //      we wouldnt have to set unused part of array to zero

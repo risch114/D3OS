@@ -15,7 +15,7 @@ impl<const S: usize> IpcQueue for IpcRingQueue<IpcMessage, S> {
         Self { ringqueue: Ringqueue::new(), waiting_threads: Mutex::new([const { None }; _]) }
     }
     
-    fn send(&self, name: &str, bytes: &[u8], msg_type: IpcMessageType, sender_pid: &uuid::Uuid, sender_tid: usize, callback: &str) -> Result<usize, IpcError> {
+    fn send(&self, name: &str, bytes: &[u8], msg_type: IpcMessageType, sender_pid: &uuid::Uuid, sender_tid: usize, callback: (&str, &str)) -> Result<usize, IpcError> {
 
         // reserve space in ringbuffer
         let reserved = self.ringqueue.reserve();

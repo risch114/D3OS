@@ -1,21 +1,17 @@
-use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use alloc::{string::{String, ToString}, sync::Arc, vec::Vec};
-use d3os::{const_string::ConstString, copy_from_slice_sizechecked};
+use d3os::{any_as_bytes, bytes_as_any, const_string::ConstString, copy_from_slice_sizechecked};
 use ipc::{ipc_endpoint::IpcEndpoint, queues::IpcQueueType};
 use naming::shared_types::DirEntry;
 use spin::rwlock::RwLock;
 use syscall::return_vals::Errno;
 use uuid::Uuid;
 
-use crate::{consts, naming::{stat::Mode, traits::{DirectoryObject, FileObject, FileSystem, NamedObject}}, process::core_local_storage::scheduler};
+use crate::process::core_local_storage::scheduler;
+use crate::naming::stat::Mode;
+use crate::naming::traits::{DirectoryObject, FileObject, FileSystem, NamedObject};
 
-#[derive(Debug)]
-pub struct Service {
-    pub name: String,
-    pub ipc_endpoints_addr: usize,
-    pub owning_pid: Uuid,
-}
 
 pub struct ServiceFs {
     service_root_dir: Arc<ServiceRootDir>,
@@ -42,7 +38,9 @@ pub struct ServiceRootDir {
 
 impl ServiceRootDir {
     pub fn new() -> Self {
-        Self { services: RwLock::new(Vec::new()) }
+        let s = Self { services: RwLock::new(Vec::new()) };
+        s.services.write().push(Arc::new(ServiceDir::new("callback")));
+        s
     }
 }
 
@@ -52,7 +50,10 @@ impl DirectoryObject for ServiceRootDir {
         // the current directory is /svc
         // check for /svc/<name>
         match self.services.read().iter().find(|&svc_dir| svc_dir.name.as_str() == name) {
-            Some(svc_dir) => Ok(svc_dir.directory_obj()),
+            Some(svc_dir) => {
+                let svc_dir_clone = Arc::clone(svc_dir);
+                Ok(NamedObject::DirectoryObject(svc_dir_clone))
+            },
             None => Err(Errno::ENOENT)
         }
     }
@@ -60,7 +61,8 @@ impl DirectoryObject for ServiceRootDir {
     fn list(&self) -> Result<Vec<(NamedObject, String)>, Errno> {
         let mut list = Vec::new();
         for svc_dir in self.services.read().iter() {
-            list.push((svc_dir.directory_obj(), String::clone(&svc_dir.name)));
+            let svc_dir_clone = Arc::clone(svc_dir);
+            list.push((NamedObject::DirectoryObject(svc_dir_clone), String::clone(&svc_dir.name)));
         }
         Ok(list)
     }
@@ -114,18 +116,17 @@ impl DirectoryObject for ServiceRootDir {
 
 #[derive(Debug)]
 pub struct ServiceDir {
-    name: Arc<String>,
-    endpoints: Arc<RwLock<Vec<Endpoint>>>,
+    name: String,
+    endpoints: RwLock<Vec<Arc<EndpointFile>>>,
 }
 
 impl ServiceDir {
 
     pub fn new(name: &str) -> Self {
-        Self { name: Arc::new(name.to_string()), endpoints: Arc::new(RwLock::new(Vec::new())) }
-    }
-
-    pub fn directory_obj(&self) -> super::traits::NamedObject {
-        NamedObject::DirectoryObject(Arc::new(ServiceDir { name: Arc::clone(&self.name), endpoints: Arc::clone(&self.endpoints) }))
+        Self {
+            name: name.to_string(),
+            endpoints: RwLock::new(Vec::new())
+        }
     }
 }
 
@@ -135,7 +136,10 @@ impl DirectoryObject for ServiceDir {
         // the current directory is /svc/service_name/
         // check for /svc/service_name/<name>
         match self.endpoints.read().iter().find(|&endpoint| endpoint.name() == name) {
-            Some(endpoint) => Ok(NamedObject::FileObject(Arc::new(Endpoint::copy(&endpoint)))),
+            Some(endpoint) => {
+                let endpoint_clone = Arc::clone(&endpoint);
+                Ok(NamedObject::FileObject(endpoint_clone))
+            },
             None => Err(Errno::ENOENT)
         }
     }
@@ -143,7 +147,8 @@ impl DirectoryObject for ServiceDir {
     fn list(&self) -> Result<Vec<(NamedObject, String)>, Errno> {
         let mut list = Vec::new();
         for endpoint in self.endpoints.read().iter() {
-            list.push((NamedObject::FileObject(Arc::new(Endpoint::copy(&endpoint))), endpoint.name().to_string()));
+            let endpoint_clone = Arc::clone(&endpoint);
+            list.push((NamedObject::FileObject(endpoint_clone), endpoint.name().to_string()));
         }
         Ok(list)
     }
@@ -155,10 +160,10 @@ impl DirectoryObject for ServiceDir {
         }
     }
 
-    fn create_file(&self, _name: &str, _mode: Mode) -> Result<NamedObject, Errno> {
-        let endpoint = Endpoint { address: AtomicUsize::new(0) };
-        self.endpoints.write().push(Endpoint::copy(&endpoint));
-        Ok(NamedObject::FileObject(Arc::new(endpoint)))
+    fn create_file(&self, name: &str, _mode: Mode) -> Result<NamedObject, Errno> {
+        let endpoint = Arc::new(EndpointFile::new(name.to_string(), 0, Uuid::nil()));
+        self.endpoints.write().push(Arc::clone(&endpoint));
+        Ok(NamedObject::FileObject(endpoint))
     }
 
     fn create_dir(&self, _name: &str, _mode: Mode) -> Result<NamedObject, Errno> {
@@ -195,23 +200,26 @@ impl DirectoryObject for ServiceDir {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Endpoint {
-    address: AtomicUsize,
+    /// physical endpoint address
+    address: usize,
+    /// owning process id
+    process_id: Uuid,
 }
 
 impl Endpoint {
 
-    pub fn copy(other: &Self) -> Self {
-        Self { address: AtomicUsize::new(other.address()) }
+    pub fn new(address: usize, pid: Uuid) -> Self {
+        Self { address, process_id: pid }
     }
 
-    pub fn address(&self) -> usize {
-        self.address.load(core::sync::atomic::Ordering::Relaxed)
+    pub fn process_id(&self) -> &Uuid {
+        &self.process_id
     }
 
     pub fn endpoint(&self) -> &IpcEndpoint {
-        unsafe { &*(self.address() as *const IpcEndpoint) }
+        unsafe { &*(self.address as *const IpcEndpoint) }
     }
 
     pub fn name(&self) -> ConstString<{ ipc::ipc_endpoint::ENDPOINT_NAME_LEN }> {
@@ -223,30 +231,72 @@ impl Endpoint {
     }
 }
 
-impl FileObject for Endpoint {
+#[derive(Debug)]
+struct EndpointFile {
+    name: String,
+    /// physical endpoint address
+    address: AtomicUsize,
+    /// owning process id
+    process_id: (AtomicU64, AtomicU64),
+}
+
+impl EndpointFile {
+
+    pub fn new(name: String, address: usize, pid: Uuid) -> Self {
+        let pair = pid.as_u64_pair();
+        Self { name, address: AtomicUsize::new(address), process_id: (AtomicU64::new(pair.0), AtomicU64::new(pair.1)) }
+    }
+
+    pub fn as_endpoint(&self) -> Endpoint {
+        Endpoint::new(
+            self.address.load(Ordering::Relaxed), 
+            Uuid::from_u64_pair(self.process_id.0.load(Ordering::Relaxed), self.process_id.1.load(Ordering::Relaxed))
+        )
+    }
+
+    pub fn set(&self, address: usize, process_id: Uuid) {
+        self.address.store(address, Ordering::Relaxed);
+        let pair = process_id.as_u64_pair();
+        self.process_id.0.store(pair.0, Ordering::Relaxed);
+        self.process_id.1.store(pair.1, Ordering::Relaxed);
+    }
+
+    pub fn ipc_endpoint(&self) -> &IpcEndpoint {
+        unsafe { &*(self.address.load(Ordering::Relaxed) as *const IpcEndpoint) }
+    }
+
+    pub fn name(&self) -> &String {
+        &self.name
+    }
+
+    pub fn queue(&self) -> &IpcQueueType {
+        &self.ipc_endpoint().queue
+    }
+}
+
+impl FileObject for EndpointFile {
     
     /// read `Endpoint` into `buf`
     fn read(&self, buf: &mut [u8], _offset: usize, _options: naming::shared_types::OpenOptions) -> Result<usize, syscall::return_vals::Errno> {
-        let selfslice = unsafe { core::slice::from_raw_parts((self as *const Self) as *const u8, core::mem::size_of::<Self>()) };
-        d3os::copy_from_slice_sizechecked!(buf, selfslice);
+        let endpoint = self.as_endpoint();
+        let bytes = unsafe { any_as_bytes!(&endpoint) };
+        d3os::copy_from_slice_sizechecked!(buf, bytes);
         Ok(0)
     }
 
     fn write(&self, buf: &[u8], _offset: usize, _options: naming::shared_types::OpenOptions) -> Result<usize, Errno> {
 
-        let mut le_bytes = [0; size_of::<usize>()];
-        copy_from_slice_sizechecked!(le_bytes, buf);
-        let endpoint_addr_virt = usize::from_le_bytes(le_bytes);
+        let endpoint = unsafe { bytes_as_any!(buf; Endpoint) };
 
         let process = scheduler().current_thread().process();
         let endpoint_addr_phys = process
             .virtual_address_space
-            .translate_addr(endpoint_addr_virt)
+            .translate_addr(endpoint.address)
             .ok_or(Errno::EACCES)?;
             //.expect("ipc endpoint isnt mapped into virt addr space");
         
-        self.address.store(endpoint_addr_phys, core::sync::atomic::Ordering::Relaxed);
-        Ok(endpoint_addr_phys)
+        self.set(endpoint_addr_phys, endpoint.process_id);
+        Ok(size_of::<Endpoint>())
     }
 
     fn stat(&self) -> Result<super::stat::Stat, Errno> {

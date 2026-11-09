@@ -172,6 +172,8 @@ pub const APPLICATION_REGISTRY: &[Application] = &[
             ("-s", &["<service_name>"]),
             ("-svc", &["<service_name>"]),
             ("-service", &["<service_name>"]),
+            ("-e", &["<endpoint_name>"]),
+            ("-endpoint", &["<endpoint_name>"]),
             ("-n", &["<message_name>"]),
             ("-name", &["<message_name>"]),
             ("-t", &["usize", "isize", "i32", "f64", "raw", "empty", "string"]),

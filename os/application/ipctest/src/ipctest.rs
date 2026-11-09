@@ -73,7 +73,7 @@ pub fn main() {
             .map(|r| r.unwrap())
             .collect();
 
-        let res = ipc::send("ipctest_recv", "ipctest numbers", args_numbers.as_slice());
+        let res = ipc::send("ipctest", "ipctest_recv", "ipctest numbers", args_numbers.as_slice());
         match res {
             Ok(_) => println!("Send message successfully"),
             Err(err) => println!("Error sending message: {:?}", err),
@@ -97,10 +97,11 @@ pub fn main() {
         }
     } else if command == "pingpong" {
 
-        let endpoint_name = "ipctest_pong";
+        let service_name = "pingpong";
+        let endpoint_name = "pong";
 
         // register self as pong
-        ipc::register_ipc_endpoint("ipctest_pingpong", endpoint_name);
+        ipc::register_ipc_endpoint(service_name, endpoint_name);
 
         // start ping
         thread::start_application("ipctest", vec!["pingpong_ping"]);
@@ -112,7 +113,7 @@ pub fn main() {
                     let ping = msg.msg().data_as_usize_unchecked().unwrap();
                     let pong = ping + 1;
                     log::info!("PONG! [{}]", pong);
-                    ipc::answer_with_callback(&msg.msg(), "pong", endpoint_name, pong);
+                    ipc::answer_with_callback(&msg.msg(), "pong", (service_name, endpoint_name), pong);
                     if ping > 100 {
                         println!("Pong done!");
                         return;
@@ -128,11 +129,15 @@ pub fn main() {
         }
     } else if command == "pingpong_ping" {
 
-        let endpoint_name = "ipctest_ping";
+        let service_name = "pingpong";
+        let endpoint_name = "ping";
+
+        // register self as ping
+        ipc::register_ipc_endpoint(service_name, endpoint_name);
 
         // send first ping
         log::info!("PING! [{}]", 1);
-        ipc::send_with_callback("ipctest_pong", "ping", endpoint_name, 1);
+        ipc::send_with_callback(service_name, "pong", "ping", (service_name, endpoint_name), 1);
 
         // wait for pong
         loop {
@@ -141,7 +146,7 @@ pub fn main() {
                     let pong = msg.msg().data_as_usize_unchecked().unwrap();
                     let ping = pong + 1;
                     log::info!("PING! [{}]", ping);
-                    ipc::answer_with_callback(&msg.msg(), "ping", endpoint_name, ping);
+                    ipc::answer_with_callback(&msg.msg(), "ping", (service_name, endpoint_name), ping);
                     if pong > 100 {
                         println!("Ping done!");
                         return;
@@ -158,12 +163,11 @@ pub fn main() {
     } else if command == "loop" {
 
         let limit = 50;
+        let service_name = "loop";
 
-        ipc::register_ipc_endpoint("ipctest_loop", "ipctest_recv");
+        ipc::register_ipc_endpoint(service_name, "recv");
 
-        let mut args_send = Vec::new();
-        args_send.push("loop_send");
-        thread::start_application("ipctest", args_send);
+        thread::start_application("ipctest", vec!["loop_send"]);
 
         let mut prev = 0;
 
@@ -173,14 +177,14 @@ pub fn main() {
                 println!("Received Message: {}", number);
                 if number == limit {
                     println!("Successfully received {} messages. Sending STOP signal and exiting...", limit);
-                    ipc::send_empty("ipctest_send", "STOP");
+                    ipc::send_empty(service_name, "send", "STOP");
                     return;
                 }
                 if prev + 1 == number {
                     prev = number;
                 } else {
                     println!("Error in message order. Sending STOP signal and exiting...");
-                    ipc::send_empty("ipctest_send", "STOP");
+                    ipc::send_empty(service_name, "send", "STOP");
                     return;
                 }
             }
@@ -188,7 +192,8 @@ pub fn main() {
         }
     } else if command == "loop_send" {
 
-        ipc::register_ipc_endpoint("ipctest_loop", "ipctest_send");
+        let service_name = "loop";
+        ipc::register_ipc_endpoint(service_name, "send");
 
         let mut i = 1 as usize;
         let mut errors = 0;
@@ -196,7 +201,7 @@ pub fn main() {
         loop {
 
             // check for stop signal
-            if let Ok(msg) = ipc::receive("ipctest_send") {
+            if let Ok(msg) = ipc::receive("send") {
 
                 if msg.msg().name_as_str() == "STOP" {
                     println!("Received STOP signal ({} errors in total), exiting...", errors);
@@ -204,7 +209,7 @@ pub fn main() {
                 }
             }
 
-            let res = ipc::send("ipctest_recv", "number", i);
+            let res = ipc::send(service_name, "recv", "number", i);
             match res {
                 Ok(_) => {
                     println!("Send Message: {} with {} errors", i, errors);
@@ -217,13 +222,13 @@ pub fn main() {
         }
     } else if command == "struct" {
         
-        ipc::register_ipc_endpoint("ipctest_struct", "ipctest_struct_recv");
+        ipc::register_ipc_endpoint("ipctest_struct", "recv");
         thread::start_application("ipctest", vec!["struct_send"]);
 
         thread::sleep(1500);
 
         loop {
-            match ipc::receive("ipctest_struct_recv") {
+            match ipc::receive("recv") {
                 Ok(msg) => {
                     let my_struct: &MyStruct = unsafe { ipc::bytes_as_any(&*msg.msg().data_as_bytes()) };
                     println!("-- Receive --\n{:}", my_struct);
@@ -241,10 +246,12 @@ pub fn main() {
             c: ConstString::from("Hello World!"),
         };
         println!("-- Sender --\n{:}", my_struct);
-        ipc::send_struct("ipctest_struct_recv", "test", &my_struct);
+        ipc::send_struct("ipctest_struct", "recv", "test", &my_struct);
     } else if command == "contention" || command == "c" {
+
+        let service_name = "ipctest_contention";
         
-        ipc::register_ipc_endpoint("ipctest_contention", "ipctest_contention_recv");
+        ipc::register_ipc_endpoint(service_name, "recv");
 
         let num_child_processes = 4;
 
@@ -259,7 +266,7 @@ pub fn main() {
         let mut num_stop_req = 0;
 
         loop {
-            match ipc::receive("ipctest_contention_recv") {
+            match ipc::receive("recv") {
                 Ok(msg_wrapper) => {
                     let msg = msg_wrapper.msg();
                     match msg.name_as_str() {
@@ -292,11 +299,12 @@ pub fn main() {
             thread::sleep(100);
         }
     } else if command == "contention_sender" {
+        let service_name = "ipctest_contention";
         let mut a = tid;
         let b = 2;
         loop {
             log::info!("{} Sending {}*{}", tid, a, b);
-            match ipc::send_and_receive_busy_polling("ipctest_contention_recv", "mult", &[a, b], 5000) {
+            match ipc::send_and_receive_busy_polling(service_name, "recv", "mult", &[a, b], 5000) {
                 Ok(msg_wrapper) => {
                     a = msg_wrapper.msg().data_as_usize_unchecked().unwrap();
                     match a {
@@ -306,7 +314,7 @@ pub fn main() {
                         5000..usize::MAX => {
                             log::info!("{} Received {}", tid, a);
                             //ipc::answer_with_name(msg_wrapper.msg(), "CTRL", ());
-                            ipc::send_empty("ipctest_contention_recv", "STOP");
+                            ipc::send_empty(service_name, "recv", "STOP");
                             println!("{} Done!", tid);
                             return;
                         },
@@ -325,17 +333,19 @@ pub fn main() {
         }
     } else if command == "mathserver" || command == "ms" {
 
-        ipc::register_ipc_endpoint("ipctest_mathserver", "mathserver_ctrl");
+        let service_name = "mathserver";
+
+        ipc::register_ipc_endpoint(service_name, "ctrl");
 
         let math_fns: [(&str, fn(f64, f64) -> f64); 4] = [
-            ("mathserver_add", |i1, i2| i1 + i2),
-            ("mathserver_sub", |i1, i2| i1 - i2),
-            ("mathserver_mult", |i1, i2| i1 * i2),
-            ("mathserver_div", |i1, i2| i1 / i2),
+            ("add", |i1, i2| i1 + i2),
+            ("sub", |i1, i2| i1 - i2),
+            ("mult", |i1, i2| i1 * i2),
+            ("div", |i1, i2| i1 / i2),
         ];
 
         for (endpoint_name, _) in math_fns {
-            ipc::register_ipc_endpoint("ipctest_mathserver", endpoint_name);
+            ipc::register_ipc_endpoint(service_name, endpoint_name);
         }
 
         let num_child_processes = 2;
@@ -409,7 +419,7 @@ pub fn main() {
         }
 
         loop {
-            match ipc::receive_blocking("mathserver_ctrl", 5000) {
+            match ipc::receive_blocking("ctrl", 5000) {
                 Ok(msg_wrapper) => {
                     let msg = msg_wrapper.msg();
                     if msg.name() == "STOP" {
@@ -432,10 +442,10 @@ pub fn main() {
     } else if command == "mathclient" || command == "mc" {
 
         let math_fns = [
-            "mathserver_add",
-            "mathserver_sub",
-            "mathserver_mult",
-            "mathserver_div",
+            "add",
+            "sub",
+            "mult",
+            "div",
         ];
         let math_symb = [
             "+", "-", "*", "/",
@@ -453,12 +463,12 @@ pub fn main() {
             let f = syscall(syscall::SystemCall::GetSystemTime, &[]).unwrap();
 
             let ridx = (f * 7) % 4;
-            let service_name = math_fns[ridx];
+            let endpoint_name = math_fns[ridx];
 
             let n1 = (r1 * 1009) % 999;
             let n2 = (r2 * 1093) % 999;
 
-            match ipc::send_and_receive_busy_polling(service_name, "MATH", &[n1, n2], 5000) {
+            match ipc::send_and_receive_busy_polling("mathserver", endpoint_name, "MATH", &[n1, n2], 5000) {
                 Ok(msg_wrapper) => {
                     let res = msg_wrapper.msg().data_as_f64_unchecked();
                     println!("[{}] Sent {} {} {}, received {}", tid, n1, math_symb[ridx], n2, res);
@@ -470,7 +480,7 @@ pub fn main() {
             }
 
             if count >= limit {
-                ipc::send_empty("mathserver_ctrl", "STOP");
+                ipc::send_empty("mathserver", "ctrl", "STOP");
                 println!("[{}] Done", tid);
                 return;
             }
@@ -498,36 +508,37 @@ impl Display for MyStruct {
 fn send_msg_from_args(args: &[String]) -> Result<usize, IpcError> {
 
     let service_name = args.get(0).unwrap();
-    let msg_name = args.get(1).cloned().unwrap_or("default".to_string());
-    let msg_data_type = args.get(2).map(|s| s.as_str().into()).unwrap_or(IpcMessageType::Empty);
+    let endpoint_name = args.get(1).unwrap();
+    let msg_name = args.get(2).cloned().unwrap_or("default".to_string());
+    let msg_data_type = args.get(3).map(|s| s.as_str().into()).unwrap_or(IpcMessageType::Empty);
 
     match msg_data_type {
         IpcMessageType::Usize | IpcMessageType::UsizeSlice => {
-            let content: Vec<usize> = args[3..].iter().map(|arg| arg.parse().unwrap_or_default()).collect();
-            ipc::send(service_name, &msg_name, content.as_slice())
+            let content: Vec<usize> = args[4..].iter().map(|arg| arg.parse().unwrap_or_default()).collect();
+            ipc::send(service_name, endpoint_name, &msg_name, content.as_slice())
         },
         IpcMessageType::Isize | IpcMessageType::IsizeSlice => {
-            let content: Vec<isize> = args[3..].iter().map(|arg| arg.parse().unwrap_or_default()).collect();
-            ipc::send(service_name, &msg_name, content.as_slice())
+            let content: Vec<isize> = args[4..].iter().map(|arg| arg.parse().unwrap_or_default()).collect();
+            ipc::send(service_name, endpoint_name, &msg_name, content.as_slice())
         },
         IpcMessageType::I32 | IpcMessageType::I32Slice => {
-            let content: Vec<i32> = args[3..].iter().map(|arg| arg.parse().unwrap_or_default()).collect();
-            ipc::send(service_name, &msg_name, content.as_slice())
+            let content: Vec<i32> = args[4..].iter().map(|arg| arg.parse().unwrap_or_default()).collect();
+            ipc::send(service_name, endpoint_name, &msg_name, content.as_slice())
         },
         IpcMessageType::F64 | IpcMessageType::F64Slice => {
-            let content: Vec<f64> = args[3..].iter().map(|arg| arg.parse().unwrap_or_default()).collect();
-            ipc::send(service_name, &msg_name, content.as_slice())
+            let content: Vec<f64> = args[4..].iter().map(|arg| arg.parse().unwrap_or_default()).collect();
+            ipc::send(service_name, endpoint_name, &msg_name, content.as_slice())
         },
-        IpcMessageType::Empty => ipc::send_empty(service_name, &msg_name),
+        IpcMessageType::Empty => ipc::send_empty(service_name, endpoint_name, &msg_name),
         IpcMessageType::Raw => {
-            ipc::send(service_name, &msg_name, args.get(3).map(|s| s.as_bytes()).unwrap_or(&[]))
+            ipc::send(service_name, endpoint_name, &msg_name, args.get(4).map(|s| s.as_bytes()).unwrap_or(&[]))
         },
         IpcMessageType::String => {
-            ipc::send(service_name, &msg_name, args.get(3).unwrap_or(&String::new()))
+            ipc::send(service_name, endpoint_name, &msg_name, args.get(4).unwrap_or(&String::new()))
         },
         IpcMessageType::Struct => {
             unimplemented!("how would structs work with rust? (missing runtime reflection)");
         },
-        _ => ipc::send_empty(service_name, &msg_name),
+        _ => ipc::send_empty(service_name, endpoint_name, &msg_name),
     }
 }

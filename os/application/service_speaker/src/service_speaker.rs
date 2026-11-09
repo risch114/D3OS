@@ -11,9 +11,9 @@ use runtime::*;
 #[unsafe(no_mangle)]
 pub fn main() {
 
-    let endpoint_name = "svc_speaker";
+    let endpoint_name = "recv";
     
-    let _res = ipc::register_ipc_endpoint("service_speaker", endpoint_name);
+    let _res = ipc::register_ipc_endpoint("speaker", endpoint_name);
 
     loop {
 
