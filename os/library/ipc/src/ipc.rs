@@ -6,45 +6,51 @@
 pub mod ipc_message;
 pub mod ipc_message_numbers;
 pub mod ipc_error;
+pub mod ipc_mailbox;
 pub mod ipc_endpoint;
 pub mod queues;
 
 extern crate alloc;
 
+use core::sync::atomic::AtomicBool;
 
 use alloc::format;
 use alloc::string::ToString;
+use alloc::vec::Vec;
 use d3os::const_string::ConstString;
+use spin::Mutex;
 use syscall::{SystemCall, syscall};
 
 use concurrent::{process, thread};
 
-use crate::ipc_endpoint::{ENDPOINT_NAME_LEN, IpcEndpoints};
+use crate::ipc_endpoint::{ENDPOINT_NAME_LEN, IpcEndpoint, IpcEndpoints};
 use crate::ipc_message::{IpcMessage, IpcMessageContent, IpcMessageData, IpcMessageType, IpcMessageWrapper};
 use crate::ipc_error::IpcError;
 use crate::queues::IpcQueue;
 
 // Schnittstelle für Interprozesskommunikation
 
-const SERVICE_NAME_LEN: usize = 64;
+const USER_SPACE_MAILBOX_START: usize = 0x10100000000;
+
+pub const SERVICE_NAME_LEN: usize = 64;
+pub const SERVICE_NUM: usize = 4;
+
+pub const ENDPOINT_NAME_LEN: usize = 64;
+pub const ENDPOINT_NUM: usize = 8;
 
 const MESSAGE_NAME_LEN: usize = 32;
 //pub const MESSAGE_DATA_SIZE: usize = 0x100 - (size_of::<Uuid>() + size_of::<usize>() + MESSAGE_TAG_LEN);
 pub const MESSAGE_DATA_SIZE: usize = 0x100;
 const MAX_NUM_MESSAGES: usize = 16;
 
-const USER_SPACE_MAILBOX_START: usize = 0x10100000000;
-
 /// registers an endpoint with the given name \
 /// returns an error if the endpoint already exists
 // TODO what happens when we register multiple endpoints / multiple services for this endpoint
 pub fn register_ipc_endpoint(service_name: &str, endpoint_name: &str) -> Result<usize, IpcError> {
 
-    let endpoints_ptr = USER_SPACE_MAILBOX_START as *mut IpcEndpoints;
-    // if queue is not initialized, create new queue
-    if ipc_endpoint::ENDPOINTS_INIT.compare_exchange(false, true, core::sync::atomic::Ordering::Relaxed, core::sync::atomic::Ordering::Relaxed).is_ok() {
-        unsafe { endpoints_ptr.write(IpcEndpoints::new()) };
-    }
+    let mailbox = init_mailbox();
+
+
 
     // try creating a new endpoint
     let endpoint = unsafe { (*endpoints_ptr).try_register(endpoint_name)? };

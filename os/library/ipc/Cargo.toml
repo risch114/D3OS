@@ -12,10 +12,12 @@ path = "src/ipc.rs"
 
 [features]
 #default = ["ringbuffer"]
-default = ["ringqueue"]
+#default = ["ringqueue"]
+default = ["ptrqueue"]
 #default = ["ringbuffer", "ringqueue", "lfqueue"]
 ringbuffer = []
 ringqueue = []
+ptrqueue = []
 lfqueue = ["dep:crossbeam-utils", "dep:lfqueue"]
 
 [dependencies]

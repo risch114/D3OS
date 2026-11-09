@@ -9,9 +9,6 @@ use crate::queues::IpcQueue;
 use crate::queues::IpcQueueType;
 use crate::ipc_error::IpcError;
 
-pub const ENDPOINT_NAME_LEN: usize = 64;
-pub const ENDPOINT_NUM: usize = 8;
-
 pub static ENDPOINTS_INIT: AtomicBool = AtomicBool::new(false);
 
 pub struct IpcEndpointAddress {

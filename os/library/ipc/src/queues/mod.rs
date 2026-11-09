@@ -18,10 +18,16 @@ pub mod ipc_ringqueue;
 #[cfg(feature = "ringqueue")]
 pub mod atomic_ringbuffer;
 
+#[cfg(feature = "ptrqueue")]
+pub mod atomic_ringbuffer;
+#[cfg(feature = "ptrqueue")]
+pub mod ipc_ptrqueue;
+
 pub type IpcQueueType = cfg_select! {
     feature = "lfqueue" => {ipc_lfqueue::IpcLFQueue}
     feature = "ringbuffer" => {ipc_ringbuffer::IpcRingbuffer<crate::ipc_message::IpcMessage, { crate::MAX_NUM_MESSAGES }>}
     feature = "ringqueue" => {ipc_ringqueue::IpcRingQueue<crate::ipc_message::IpcMessage, { crate::MAX_NUM_MESSAGES }>}
+    feature = "ptrqueue" => {ipc_ptrqueue::IpcPtrQueue}
 };
 
 pub trait IpcQueue {
