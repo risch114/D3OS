@@ -1,133 +1,243 @@
 use core::sync::atomic::AtomicBool;
 
-use alloc::vec::Vec;
-use alloc::string::{String, ToString};
+use alloc::string::String;
+use alloc::sync::Arc;
+use d3os::slot_map::SlotMap;
 use spin::Mutex;
 
 use crate::USER_SPACE_MAILBOX_START;
-use crate::{ENDPOINT_NUM, SERVICE_NUM, ipc_endpoint::IpcEndpoint};
+use crate::{ENDPOINT_NUM, SERVICE_NUM};
+use crate::ipc_message::{IpcMessage, IpcMessageWrapper};
+use crate::ipc_error::IpcError;
+use crate::queues::IpcQueueType;
 
 
 const MAILBOX_INIT: AtomicBool = AtomicBool::new(false);
 
-pub struct IpcMailbox {
-    services: [IpcService; SERVICE_NUM],
-    slots: Mutex<[Option<IpcMailboxSlot>; SERVICE_NUM]>, // this is only ever locked when creating or removing services (i.e. rarely)
+struct StaticMailboxes<'a> {
+    default_mailbox: IpcService<'a>,
+    mailboxes: IpcMailbox<'a>,
 }
 
-struct IpcMailboxSlot {
-    name: String,
-    index: usize,
-    ptr: *const IpcService,
+impl StaticMailboxes<'static> {
+    pub fn new() -> Self {
+        Self { default_mailbox: IpcService::new(), mailboxes: IpcMailbox::new() }
+    }
 }
 
-impl IpcMailbox {
+pub struct IpcMailbox<'a> {
+    slot_map: SlotMap<'a, IpcService<'a>, SERVICE_NUM>, // this is only ever locked when creating or removing services (i.e. rarely)
+}
+
+impl<'a> IpcMailbox<'a> {
 
     pub fn new() -> Self {
-        Self { services: core::array::from_fn(|_| IpcService::new()), slots: Mutex::new(core::array::from_fn(|_| None)) }
+        Self { slot_map: SlotMap::new() }
     }
 
-    pub fn find(&self, name: &str) -> Option<&'static IpcService> {
-        let idx = self.index(name)?;
-        let ptr = self.slots.lock()[idx].as_ref()?.ptr;
-        unsafe { Some(&*ptr) }
+    pub fn find_service(&self, service_name: &str) -> Option<&'a IpcService> {
+        self.slot_map.find(service_name)
     }
 
-    pub fn index(&self, name: &str) -> Option<usize> {
-        match self.slots.lock().iter()
-            .filter(|slot| slot.is_some())
-            .map(|opt| opt.as_ref().unwrap())
-            .find(|slot| slot.name == name) {
-                Some(slot) => Some(slot.index),
-                None => None,
-            }
+    pub fn register_service(&self, service_name: &str) -> Option<&'a IpcService> {
+        self.slot_map.occupy_slot(service_name)
     }
 
-    pub fn register(&self, name: &str) -> Option<&'static IpcService> {
+    pub unsafe fn delete_service(&self, service_name: &str) -> bool {
+        unsafe { self.slot_map.clear_slot(service_name) }
+    }
+}
 
-        let l = self.slots.lock().len();
+pub struct IpcService<'a> {
+    slot_map: SlotMap<'a, IpcEndpoint, ENDPOINT_NUM>,
+}
 
-        if l == 0 {
-            return unsafe { self.register_idx(name, 0) };
-        }
+impl<'a> IpcService<'a> {
 
-        // service already exists, return it
-        match self.find(name) {
-            Some(r) => return Some(r),
-            None => {},
-        }
-
-        // maximum number of services reached
-        if l >= SERVICE_NUM {
-            return None;
-        }
-        
-        match self.find_free_idx() {
-            Some(idx) => unsafe { self.register_idx(name, idx) },
-            None => None,
-        }
+    pub fn new() -> Self {
+        Self { slot_map: SlotMap::new() }
     }
 
-    pub fn delete(&self, name: &str) -> bool {
-
-        let l = self.slots.lock().len();
-
-        if l == 0 {
-            return false;
-        }
-        
-        let found_idx = self.index(name);
-
-        match found_idx {
-            Some(idx) => {
-                self.slots.lock()[idx] = None;
-                true
-            },
-            None => false,
-        }
+    pub fn find_endpoint(&self, endpoint_name: &str) -> Option<&'a IpcEndpoint> {
+        self.slot_map.find(endpoint_name)
     }
 
-    fn find_free_idx(&self) -> Option<usize> {
-        for (idx, slot) in self.slots.lock().iter().enumerate() {
-            if slot.is_none() {
-                return Some(idx);
-            }
-        }
-        None
+    pub fn register_endpoint(&self, endpoint_name: &str) -> Option<&'a IpcEndpoint> {
+        self.slot_map.occupy_slot(endpoint_name)
     }
 
-    unsafe fn register_idx(&self, name: &str, idx: usize) -> Option<&'static IpcService> {
-        let svc_ptr = unsafe { self.services.as_ptr().add(idx) };
-        let slot = IpcMailboxSlot {
-            name: name.to_string(),
-            index: idx,
-            ptr: svc_ptr,
+    pub unsafe fn delete_endpoint(&self, endpoint_name: &str) -> bool {
+        unsafe { self.slot_map.clear_slot(endpoint_name) }
+    }
+}
+
+impl<'a> Default for IpcService<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub static ENDPOINTS_INIT: AtomicBool = AtomicBool::new(false);
+
+pub struct IpcEndpoint {
+    pub service_name: Mutex<Arc<String>>,
+    pub endpoint_name: Mutex<Arc<String>>,
+    pub queue: IpcQueueType,
+}
+
+impl IpcEndpoint {
+
+    pub fn new() -> Self {
+        Self { service_name: Mutex::new(Arc::new(String::new())), endpoint_name: Mutex::new(Arc::new(String::new())), queue: IpcQueueType::new() }
+    }
+
+    pub fn receive_ref(&self) -> Result<IpcMessageRef, IpcError> {
+        let (slot, message_ptr) = self.queue.receive()?;
+        Ok(IpcMessageRef {
+            service_name: Arc::clone(&self.service_name.lock()),
+            endpoint_name: Arc::clone(&self.endpoint_name.lock()),
+            message_ptr,
+            slot
+        })
+    }
+
+    pub fn receive_copy(&self) -> Result<IpcMessage, IpcError> {
+        let (slot, message_ptr) = self.queue.receive()?;
+        let message = unsafe {
+            let tmp = message_ptr.read();
+            self.free(slot);
+            tmp
         };
-        self.slots.lock()[idx] = Some(slot);
-        unsafe { Some(&*svc_ptr) }
+        Ok(message)
+    }
+
+    pub fn receive_ref_blocking(&self, timeout_ms: usize) -> Result<IpcMessageRef, IpcError> {
+        let (slot, message_ptr) = self.queue.receive_blocking(timeout_ms)?;
+        Ok(IpcMessageRef {
+            service_name: Arc::clone(&self.service_name.lock()),
+            endpoint_name: Arc::clone(&self.endpoint_name.lock()),
+            message_ptr,
+            slot
+        })
+    }
+
+    pub fn receive_copy_blocking(&self, timeout_ms: usize) -> Result<IpcMessage, IpcError> {
+        let (slot, message_ptr) = self.queue.receive_blocking(timeout_ms)?;
+        let message = unsafe {
+            let tmp = message_ptr.read();
+            self.free(slot);
+            tmp
+        };
+        Ok(message)
+    }
+
+    unsafe fn free(&self, slot: usize) {
+        unsafe { self.queue.free_slot_unchecked(slot) };
     }
 }
 
-pub struct IpcService {
-    endpoints: [IpcEndpoint; ENDPOINT_NUM],
-    free_slots: Mutex<Vec<usize>>,
-}
-
-impl IpcService {
-    pub fn take_slot(&self) -> Option<usize> {
-        self.free_slots.lock().pop()
-    }
-    pub fn free_slot(&self, slot: usize) {
-        self.free_slots.lock().push(slot);
+impl Default for IpcEndpoint {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-pub fn init_mailbox() -> &'static IpcMailbox {
+
+
+pub fn init_mailboxes() -> &'static StaticMailboxes<'static> {
+    let ptr = USER_SPACE_MAILBOX_START as *mut StaticMailboxes;
     if !MAILBOX_INIT.load(core::sync::atomic::Ordering::Relaxed) {
         unsafe {
-            (USER_SPACE_MAILBOX_START as *mut IpcMailbox).write(IpcMailbox::new())
+            ptr.write(StaticMailboxes::new())
         };
         MAILBOX_INIT.store(true, core::sync::atomic::Ordering::Relaxed);
     }
-    unsafe { &*(USER_SPACE_MAILBOX_START as *mut IpcMailbox) }
+    unsafe { &*ptr }
+}
+
+pub fn register_service(service_name: &str) -> Option<&'static IpcService<'static>> {
+    let mailboxes = init_mailboxes();
+    if service_name == "" {
+        Some(&mailboxes.default_mailbox)
+    } else {
+        mailboxes.mailboxes.register_service(service_name)
+    }
+}
+
+pub fn register_endpoint(service_name: &str, endpoint_name: &str) -> Result<&'static IpcEndpoint, IpcError> {
+    match register_service(service_name) {
+        Some(service) => {
+            match service.find_endpoint(endpoint_name) {
+                None => {
+                    match service.register_endpoint(endpoint_name) {
+                        Some(endpoint) => Ok(endpoint),
+                        None => Err(IpcError::Full),
+                    }
+                },
+                Some(_) => Err(IpcError::EndpointAlreadyExists),
+            }
+        },
+        None => Err(IpcError::Full),
+    }
+}
+
+pub fn find_endpoint(service_name: &str, endpoint_name: &str) -> Result<&'static IpcEndpoint, IpcError> {
+    let mailboxes = init_mailboxes();
+    let find_service = if service_name == "" {
+        Some(&mailboxes.default_mailbox)
+    } else {
+        mailboxes.mailboxes.find_service(service_name)
+    };
+    match find_service {
+        Some(service) => {
+            match service.find_endpoint(endpoint_name) {
+                Some(endpoint) => Ok(endpoint),
+                None => Err(IpcError::EndpointNotFound),
+            }
+        },
+        None => Err(IpcError::ServiceNotFound),
+    }
+}
+
+pub struct IpcMessageRef {
+    service_name: Arc<String>,
+    endpoint_name: Arc<String>,
+    message_ptr: *mut IpcMessage,
+    slot: usize,
+}
+
+impl IpcMessageRef {
+    pub fn msg_checked(&self) -> Result<&'static IpcMessage, IpcError> {
+        match find_endpoint(&self.service_name, &self.endpoint_name) {
+            Ok(endpoint) => {
+                unsafe {
+                    let ptr = endpoint.queue.slot_unchecked(self.slot);
+                    Ok(&*ptr)
+                }
+            },
+            Err(_) => Err(IpcError::Invalid),
+        }
+    }
+    pub unsafe fn msg_unchecked(&self) -> &'static IpcMessage {
+        unsafe {
+            &*self.message_ptr
+        }
+    }
+}
+
+impl IpcMessageWrapper for IpcMessageRef {
+    fn msg(&self) -> &IpcMessage {
+        unsafe { self.msg_unchecked() }
+    }
+}
+
+impl Drop for IpcMessageRef {
+    fn drop(&mut self) {
+        match find_endpoint(&self.service_name, &self.endpoint_name) {
+            Ok(endpoint) => {
+                unsafe { endpoint.free(self.slot) };
+            },
+            Err(_) => {},
+        }
+    }
 }

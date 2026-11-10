@@ -8,3 +8,14 @@ authors = ["Richard Schweitzer <risch114@uni-duesseldorf.de"]
 test = false
 doctest = false
 bench = false
+
+[features]
+default = [ "const_string", "slot_map" ]
+const_string = []
+slot_map = [ "dep:spin" ]
+
+[dependencies]
+
+# External dependencies
+
+spin = { version = "0.12", optional = true }

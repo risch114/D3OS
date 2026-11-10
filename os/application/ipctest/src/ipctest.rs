@@ -79,9 +79,9 @@ pub fn main() {
             Err(err) => println!("Error sending message: {:?}", err),
         }
     } else if command == "start_receive" {
-        ipc::register_ipc_endpoint("ipctest", "ipctest_recv");
+        let endpoint = ipc::register_ipc_endpoint("ipctest", "ipctest_recv").unwrap();
         loop {
-            match ipc::receive("ipctest_recv") {
+            match endpoint.receive_ref() {
                 Ok(msg_wrapper) => {
                     let m = msg_wrapper.msg();
                     println!("Received Message: {}", m);
@@ -101,14 +101,14 @@ pub fn main() {
         let endpoint_name = "pong";
 
         // register self as pong
-        ipc::register_ipc_endpoint(service_name, endpoint_name);
+        let endpoint = ipc::register_ipc_endpoint(service_name, endpoint_name).unwrap();
 
         // start ping
         thread::start_application("ipctest", vec!["pingpong_ping"]);
 
         // wait for ping
         loop {
-            match ipc::receive_blocking(endpoint_name, 5000) {
+            match endpoint.receive_ref_blocking(5000) {
                 Ok(msg) => {
                     let ping = msg.msg().data_as_usize_unchecked().unwrap();
                     let pong = ping + 1;
@@ -133,7 +133,7 @@ pub fn main() {
         let endpoint_name = "ping";
 
         // register self as ping
-        ipc::register_ipc_endpoint(service_name, endpoint_name);
+        let endpoint = ipc::register_ipc_endpoint(service_name, endpoint_name).unwrap();
 
         // send first ping
         log::info!("PING! [{}]", 1);
@@ -141,7 +141,7 @@ pub fn main() {
 
         // wait for pong
         loop {
-            match ipc::receive_blocking(endpoint_name, 5000) {
+            match endpoint.receive_ref_blocking(5000) {
                 Ok(msg) => {
                     let pong = msg.msg().data_as_usize_unchecked().unwrap();
                     let ping = pong + 1;
@@ -165,14 +165,14 @@ pub fn main() {
         let limit = 50;
         let service_name = "loop";
 
-        ipc::register_ipc_endpoint(service_name, "recv");
+        let endpoint = ipc::register_ipc_endpoint(service_name, "recv").unwrap();
 
         thread::start_application("ipctest", vec!["loop_send"]);
 
         let mut prev = 0;
 
         loop {
-            while let Ok(msg) = ipc::receive("ipctest_recv") {
+            while let Ok(msg) = endpoint.receive_ref() {
                 let number = msg.msg().data_as_usize_unchecked().unwrap();
                 println!("Received Message: {}", number);
                 if number == limit {
@@ -193,7 +193,7 @@ pub fn main() {
     } else if command == "loop_send" {
 
         let service_name = "loop";
-        ipc::register_ipc_endpoint(service_name, "send");
+        let endpoint = ipc::register_ipc_endpoint(service_name, "send").unwrap();
 
         let mut i = 1 as usize;
         let mut errors = 0;
@@ -201,7 +201,7 @@ pub fn main() {
         loop {
 
             // check for stop signal
-            if let Ok(msg) = ipc::receive("send") {
+            if let Ok(msg) = endpoint.receive_ref() {
 
                 if msg.msg().name_as_str() == "STOP" {
                     println!("Received STOP signal ({} errors in total), exiting...", errors);
@@ -222,13 +222,13 @@ pub fn main() {
         }
     } else if command == "struct" {
         
-        ipc::register_ipc_endpoint("ipctest_struct", "recv");
+        let endpoint = ipc::register_ipc_endpoint("ipctest_struct", "recv").unwrap();
         thread::start_application("ipctest", vec!["struct_send"]);
 
         thread::sleep(1500);
 
         loop {
-            match ipc::receive("recv") {
+            match endpoint.receive_ref() {
                 Ok(msg) => {
                     let my_struct: &MyStruct = unsafe { ipc::bytes_as_any(&*msg.msg().data_as_bytes()) };
                     println!("-- Receive --\n{:}", my_struct);
@@ -251,7 +251,7 @@ pub fn main() {
 
         let service_name = "ipctest_contention";
         
-        ipc::register_ipc_endpoint(service_name, "recv");
+        let endpoint = ipc::register_ipc_endpoint(service_name, "recv").unwrap();
 
         let num_child_processes = 4;
 
@@ -266,7 +266,7 @@ pub fn main() {
         let mut num_stop_req = 0;
 
         loop {
-            match ipc::receive("recv") {
+            match endpoint.receive_ref() {
                 Ok(msg_wrapper) => {
                     let msg = msg_wrapper.msg();
                     match msg.name_as_str() {
@@ -335,7 +335,7 @@ pub fn main() {
 
         let service_name = "mathserver";
 
-        ipc::register_ipc_endpoint(service_name, "ctrl");
+        let endpoint_ctrl = ipc::register_ipc_endpoint(service_name, "ctrl").unwrap();
 
         let math_fns: [(&str, fn(f64, f64) -> f64); 4] = [
             ("add", |i1, i2| i1 + i2),
@@ -345,7 +345,7 @@ pub fn main() {
         ];
 
         for (endpoint_name, _) in math_fns {
-            ipc::register_ipc_endpoint(service_name, endpoint_name);
+            ipc::register_ipc_endpoint(service_name, endpoint_name).unwrap();
         }
 
         let num_child_processes = 2;
@@ -363,7 +363,7 @@ pub fn main() {
                 let tid = thread::current().unwrap().id();
                 let debug_name = format!("[Mathserver - {}] {}", tid, endpoint_name);
                 loop {
-                    match ipc::receive_busy_polling(endpoint_name, 5000, 200) {
+                    match ipc::receive_busy_polling(service_name, endpoint_name, 5000, 200) {
                         Ok(msg_wrapper) => {
                             let msg = msg_wrapper.msg();
                             log::info!("{} received {}", debug_name, msg);
@@ -419,7 +419,7 @@ pub fn main() {
         }
 
         loop {
-            match ipc::receive_blocking("ctrl", 5000) {
+            match endpoint_ctrl.receive_ref_blocking(5000) {
                 Ok(msg_wrapper) => {
                     let msg = msg_wrapper.msg();
                     if msg.name() == "STOP" {

@@ -7,26 +7,18 @@ pub mod ipc_message;
 pub mod ipc_message_numbers;
 pub mod ipc_error;
 pub mod ipc_mailbox;
-pub mod ipc_endpoint;
 pub mod queues;
 
 extern crate alloc;
 
-use core::sync::atomic::AtomicBool;
-
-use alloc::format;
 use alloc::string::ToString;
-use alloc::vec::Vec;
-use d3os::const_string::ConstString;
-use spin::Mutex;
 use syscall::{SystemCall, syscall};
 
 use concurrent::{process, thread};
 
-use crate::ipc_endpoint::{ENDPOINT_NAME_LEN, IpcEndpoint, IpcEndpoints};
+use crate::ipc_mailbox::IpcEndpoint;
 use crate::ipc_message::{IpcMessage, IpcMessageContent, IpcMessageData, IpcMessageType, IpcMessageWrapper};
 use crate::ipc_error::IpcError;
-use crate::queues::IpcQueue;
 
 // Schnittstelle für Interprozesskommunikation
 
@@ -46,15 +38,16 @@ const MAX_NUM_MESSAGES: usize = 16;
 /// registers an endpoint with the given name \
 /// returns an error if the endpoint already exists
 // TODO what happens when we register multiple endpoints / multiple services for this endpoint
-pub fn register_ipc_endpoint(service_name: &str, endpoint_name: &str) -> Result<usize, IpcError> {
+pub fn register_ipc_endpoint(service_name: &str, endpoint_name: &str) -> Result<&'static IpcEndpoint, IpcError> {
 
-    let mailbox = init_mailbox();
+    let endpoint = ipc_mailbox::register_endpoint(service_name, endpoint_name)?;
+    IpcError::convert_syscall_result(
+        syscall(SystemCall::IpcRegister, &[core::ptr::from_ref(&service_name) as usize, core::ptr::from_ref(&endpoint_name) as usize, core::ptr::from_ref(endpoint) as usize])
+    ).map(|_| endpoint)
+}
 
-
-
-    // try creating a new endpoint
-    let endpoint = unsafe { (*endpoints_ptr).try_register(endpoint_name)? };
-    IpcError::convert_syscall_result(syscall(SystemCall::IpcRegister, &[core::ptr::from_ref(&service_name) as usize, core::ptr::from_ref(endpoint) as usize]))
+pub fn find_ipc_endpoint(service_name: &str, endpoint_name: &str) -> Result<&'static IpcEndpoint, IpcError> {
+    ipc_mailbox::find_endpoint(service_name, endpoint_name)
 }
 
 pub fn remove_ipc_endpoint(svc_name: &str) -> Result<usize, IpcError> {
@@ -94,7 +87,7 @@ pub fn send_and_receive<T: IpcMessageContent>(service: &str, endpoint: &str, msg
         Ok(_) => {
             let mut counter = 0;
             loop {
-                let rec = receive_blocking(endpoint, timeout_ms);
+                let rec = receive_blocking(callback.0, callback.1, timeout_ms);
                 match rec {
                     // TODO find specific answer message
                     Ok(_) => return rec,
@@ -125,7 +118,7 @@ pub fn send_and_receive_busy_polling<T: IpcMessageContent>(service: &str, endpoi
         Ok(_) => {
             let mut counter = 0;
             loop {
-                let rec = receive_busy_polling(callback.1, timeout_ms, 100);
+                let rec = receive_busy_polling(callback.0, callback.1, timeout_ms, 100);
                 match rec {
                     // TODO find specific answer message
                     Ok(_) => return rec,
@@ -188,7 +181,7 @@ pub fn send_internal(service_name: &str, target_endpoint: &str, msg_name: &str, 
     if let Err(err) = res.as_ref() {
         match err {
             IpcError::EndpointAlreadyExists => {},
-            _ => return res,
+            _ => return Err(*err),
         }
     }
 
@@ -204,15 +197,15 @@ pub fn send_internal(service_name: &str, target_endpoint: &str, msg_name: &str, 
     IpcError::convert_syscall_result(syscall(SystemCall::IpcSend, &&params))
 }
 
-pub fn receive(endpoint_name: &str) -> Result<impl IpcMessageWrapper + use<>, IpcError> {
-    let endpoints = unsafe { (USER_SPACE_MAILBOX_START as *const IpcEndpoints).as_ref_unchecked() };
-    let ipc_endpoint = endpoints.find(endpoint_name).ok_or(IpcError::EndpointNotFound)?;
-    ipc_endpoint.queue.receive()
+pub fn receive(service_name: &str, endpoint_name: &str) -> Result<impl IpcMessageWrapper + use<>, IpcError> {
+    match ipc_mailbox::find_endpoint(service_name, endpoint_name) {
+        Ok(endpoint) => endpoint.receive_ref(),
+        Err(err) => Err(err),
+    }
 }
 
 pub fn receive_answer() -> Result<impl IpcMessageWrapper + use<>, IpcError> {
-    let endpoint_name = process::current().id().to_string();
-    receive(&endpoint_name)
+    receive("", &process::current().id().to_string())
 }
 
 pub struct IpcRcvBlockingSyscallParams {
@@ -223,17 +216,18 @@ pub struct IpcRcvBlockingSyscallParams {
 
 /// block and wait for a message \
 /// will stop waiting after timeout ms
-pub fn receive_blocking(endpoint_name: &str, timeout_ms: usize) -> Result<impl IpcMessageWrapper + use<>, IpcError> {
-    let endpoints = unsafe { (USER_SPACE_MAILBOX_START as *const IpcEndpoints).as_ref_unchecked() };
-    let ipc_endpoint = endpoints.find(endpoint_name).ok_or(IpcError::EndpointNotFound)?;
-    ipc_endpoint.queue.receive_blocking(timeout_ms)
+pub fn receive_blocking(service_name: &str, endpoint_name: &str, timeout_ms: usize) -> Result<impl IpcMessageWrapper + use<>, IpcError> {
+    match ipc_mailbox::find_endpoint(service_name, endpoint_name) {
+        Ok(endpoint) => endpoint.receive_ref_blocking(timeout_ms),
+        Err(err) => Err(err),
+    }
 }
 
-pub fn receive_busy_polling(endpoint_name: &str, timeout_ms: usize, interval_ms: usize) -> Result<impl IpcMessageWrapper + use<>, IpcError> {
+pub fn receive_busy_polling(service_name: &str, endpoint_name: &str, timeout_ms: usize, interval_ms: usize) -> Result<impl IpcMessageWrapper + use<>, IpcError> {
     let time_now = syscall::syscall(syscall::SystemCall::GetSystemTime, &[]).unwrap();
     let time_timeout = time_now + timeout_ms;
     loop {
-        let rec = receive(endpoint_name);
+        let rec = receive(service_name, endpoint_name);
         if rec.is_ok() {
             return rec;
         }

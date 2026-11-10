@@ -10,14 +10,12 @@ use runtime::*;
 
 #[unsafe(no_mangle)]
 pub fn main() {
-
-    let endpoint_name = "recv";
     
-    let _res = ipc::register_ipc_endpoint("speaker", endpoint_name);
+    let endpoint = ipc::register_ipc_endpoint("speaker", "recv").unwrap();
 
     loop {
 
-        let rec = ipc::receive_blocking(endpoint_name, 5000);
+        let rec = endpoint.receive_ref_blocking(5000);
         
         if let Ok(msg_wrapper) = rec {
             let msg = msg_wrapper.msg();

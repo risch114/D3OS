@@ -1,6 +1,9 @@
 #![no_std]
 
+#[cfg(feature = "const_string")]
 pub mod const_string;
+#[cfg(feature = "slot_map")]
+pub mod slot_map;
 
 /// copy `(dst, src)`, but automatically adjust for differing sizes \
 /// returns the actual length which was copied (i.e. `min(dst.len, src.len)`)

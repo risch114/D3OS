@@ -1,7 +1,7 @@
 use syscall::return_vals;
 use syscall::return_vals::Errno;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum IpcError {
     Generic = -1,
     Timeout = -2,
@@ -12,6 +12,7 @@ pub enum IpcError {
     Invalid = -7,
     EndpointNotFound = -8,
     EndpointAlreadyExists = -9,
+    ServiceNotFound = -10,
 }
 
 impl IpcError {

@@ -1,4 +1,3 @@
-use alloc::sync::Arc;
 use spin::Mutex;
 use uuid::Uuid;
 
@@ -9,15 +8,15 @@ use crate::ipc_message::{IpcMessage, IpcMessageType} ;
 
 const S: usize = MAX_NUM_MESSAGES;
 
-pub struct IpcPtrQueue {
+pub struct IpcQueue {
     data: [IpcMessage; S],
     free_slots: Ringbuffer<usize, S>,
     used_slots: Ringbuffer<usize, S>,
     waiting_threads: Mutex<[Option<(uuid::Uuid, usize)>; S]> // used for blocking waits
 }
 
-impl IpcPtrQueue {
-    pub fn new() -> IpcPtrQueue  {
+impl IpcQueue {
+    pub fn new() -> IpcQueue  {
         let s = Self {
             data: core::array::from_fn(|_| IpcMessage::default()),
             free_slots: Ringbuffer::new(),
@@ -28,9 +27,18 @@ impl IpcPtrQueue {
         for i in 0..S { s.free_slots.push(i); }
         s
     }
-}
-
-impl IpcPtrQueue {
+    
+    /// access the message contained at the given `slot` directly \
+    /// this is unsafe if we aren't confirmed the sole owner of the given `slot`
+    pub unsafe fn slot_unchecked(&self, slot: usize) -> *mut IpcMessage {
+        self.msg_ptr(slot)
+    }
+    
+    /// free the given `slot` directly \
+    /// this is unsafe if we aren't confirmed the sole owner of the given `slot`
+    pub unsafe fn free_slot_unchecked(&self, slot: usize) {
+        self.free(slot)
+    }
 
     fn msg_ptr(&self, slot: usize) -> *mut IpcMessage {
         assert!(slot < S, "slot index out of queue bounds");
@@ -76,19 +84,19 @@ impl IpcPtrQueue {
         }
     }
 
-    pub fn receive(self: &Arc<Self>) -> Result<PtrQueueMsgWrapper, IpcError> {
+    pub fn receive(&self) -> Result<(usize, *mut IpcMessage), IpcError> {
 
         // check if there is a used slot (the queue contains data)
         if let Some(used_slot) = self.used_slots.pop() {
             
             // return a ptr to the data in the used slot, using the Wrapper, to enable automatic free on drop
-            return Ok(PtrQueueMsgWrapper { msg: self.msg_ptr(used_slot), queue: Arc::clone(self), slot: used_slot });
+            return Ok((used_slot, self.msg_ptr(used_slot)));
         }
 
         Err(IpcError::Empty)
     }
 
-    pub fn receive_blocking(self: &Arc<Self>, timeout_ms: usize) -> Result<PtrQueueMsgWrapper, IpcError> {
+    pub fn receive_blocking(&self, timeout_ms: usize) -> Result<(usize, *mut IpcMessage), IpcError> {
 
         if self.num_used() > 0 {
             return self.receive();
@@ -148,24 +156,5 @@ impl IpcPtrQueue {
     
     pub fn num_used(&self) -> usize {
         self.used_slots.num_elements()
-    }
-}
-
-/// struct used for re-freeing slot once msg is Dropped
-pub struct PtrQueueMsgWrapper {
-    msg: *const IpcMessage,
-    queue: *const IpcPtrQueue,
-    slot: usize,
-}
-impl PtrQueueMsgWrapper {
-    pub fn msg(&self) -> &IpcMessage {
-        // we are the only one holding a ptr to the message -> this should be safe
-        unsafe { &*self.msg }
-    }
-}
-
-impl Drop for PtrQueueMsgWrapper {
-    fn drop(&mut self) {
-        self.queue.free(self.slot);
     }
 }

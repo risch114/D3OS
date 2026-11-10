@@ -4,7 +4,7 @@ use core::ops::{Index, IndexMut};
 use crate::copy_from_slice_sizechecked;
 
 #[derive(Debug, Clone, Copy)]
-/// nul-terminated, const sized string
+/// const sized string
 pub struct ConstString<const S: usize> {
     buffer: [u8; S],
     /// length of the string, not the size of the buffer

@@ -3,7 +3,7 @@ use core::str;
 use alloc::vec::Vec;
 use alloc::{format, slice};
 use d3os::{any_as_bytes, bytes_as_any, copy_from_slice_sizechecked};
-use ipc::ipc_endpoint::IpcEndpoint;
+use ipc::ipc_mailbox::IpcEndpoint;
 use ipc::{IpcRcvBlockingSyscallParams, IpcSendSyscallParams, MESSAGE_DATA_SIZE};
 use ipc::queues::IpcQueue;
 use ipc::ipc_error::IpcError;
@@ -18,17 +18,16 @@ use crate::{process::core_local_storage::scheduler, sync::wait_queue::WaitQueue,
 
 static WAIT_QUEUE: WaitQueue = WaitQueue::new();
 
-pub extern "sysv64" fn sys_ipc_register(service_name_ptr: *const &str, endpoint_ptr: *const IpcEndpoint) -> isize {
+pub extern "sysv64" fn sys_ipc_register(service_name_ptr: *const &str, endpoint_name_ptr: *const &str, endpoint_ptr: *const IpcEndpoint) -> isize {
 
-    let service_name = unsafe { *service_name_ptr };
+    let service_name = unsafe { &*service_name_ptr };
+    let endpoint_name = unsafe { &*endpoint_name_ptr };
     let endpoint = unsafe { &*endpoint_ptr };
 
-    return_vals::convert_syscall_result_to_ret_code(register_new_endpoint(service_name, endpoint))
+    return_vals::convert_syscall_result_to_ret_code(register_new_endpoint(service_name, endpoint_name, endpoint))
 }
 
-fn register_new_endpoint(service_name: &str, endpoint: &IpcEndpoint) -> Result<usize, Errno> {
-
-    let endpoint_name = endpoint.name.lock().clone();
+fn register_new_endpoint(service_name: &str, endpoint_name: &str, endpoint: &IpcEndpoint) -> Result<usize, Errno> {
 
     // try creating new service directory
     let svc_filehandle = nameservice::open(&format!("/svc/{service_name}"), OpenOptions::DIRECTORY);
@@ -152,7 +151,7 @@ pub extern "sysv64" fn sys_ipc_send(params_ptr: *const IpcSendSyscallParams) -> 
         let msg_type = params.msg_type;
         let callback = params.callback;
 
-        let res = ipc_queue.send(name, &bytes, msg_type, &scheduler().current_thread().process().id(), scheduler().current_thread().id(), callback);
+        let res = ipc_queue.send_from_parts(name, &bytes, msg_type, &scheduler().current_thread().process().id(), scheduler().current_thread().id(), callback);
 
         match res {
             Ok(ok) => {

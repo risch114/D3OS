@@ -2,7 +2,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use alloc::{string::{String, ToString}, sync::Arc, vec::Vec};
 use d3os::{any_as_bytes, bytes_as_any, const_string::ConstString, copy_from_slice_sizechecked};
-use ipc::{ipc_endpoint::IpcEndpoint, queues::IpcQueueType};
+use ipc::{ipc_mailbox::IpcEndpoint, queues::IpcQueueType};
 use naming::shared_types::DirEntry;
 use spin::rwlock::RwLock;
 use syscall::return_vals::Errno;
@@ -220,10 +220,6 @@ impl Endpoint {
 
     pub fn endpoint(&self) -> &IpcEndpoint {
         unsafe { &*(self.address as *const IpcEndpoint) }
-    }
-
-    pub fn name(&self) -> ConstString<{ ipc::ipc_endpoint::ENDPOINT_NAME_LEN }> {
-        self.endpoint().name.lock().clone()
     }
 
     pub fn queue(&self) -> &IpcQueueType {
