@@ -1,3 +1,5 @@
+use core::sync::atomic::AtomicUsize;
+
 use spin::Mutex;
 
 use crate::const_string::ConstString;
@@ -6,6 +8,7 @@ use crate::const_string::ConstString;
 pub struct SlotMap<'a, T: Default, const S: usize> {
     data: [T; S],
     slots: Mutex<[Option<Slot<'a, T>>; S]>,
+    num_elems: AtomicUsize,
 }
 
 struct Slot<'a, T: Default> {
@@ -17,7 +20,7 @@ struct Slot<'a, T: Default> {
 impl<'a, T: Default, const S: usize> SlotMap<'a, T, S> {
 
     pub fn new() -> Self {
-        Self { data: core::array::from_fn(|_| T::default()), slots: Mutex::new(core::array::from_fn(|_| None)) }
+        Self { data: core::array::from_fn(|_| T::default()), slots: Mutex::new(core::array::from_fn(|_| None)), num_elems: AtomicUsize::new(0) }
     }
 
     /// find the element with `name`
@@ -47,9 +50,9 @@ impl<'a, T: Default, const S: usize> SlotMap<'a, T, S> {
     /// if there already exists a slot with `name`, return the existing data instead
     pub fn occupy_slot(&self, name: &str) -> Option<&'a T> {
 
-        let l = self.slots.lock().len();
+        let num_elems = self.num_elems.load(core::sync::atomic::Ordering::Relaxed);
 
-        if l == 0 {
+        if num_elems == 0 {
             return unsafe { self.register_idx(name, 0) };
         }
 
@@ -59,7 +62,7 @@ impl<'a, T: Default, const S: usize> SlotMap<'a, T, S> {
         }
 
         // maximum number of services reached
-        if l >= S {
+        if num_elems >= S {
             return None;
         }
         
@@ -72,9 +75,9 @@ impl<'a, T: Default, const S: usize> SlotMap<'a, T, S> {
     /// free the slot with `name`, without clearing the underlying data
     pub fn free_slot(&self, name: &str) -> bool {
 
-        let l = self.slots.lock().len();
+        let num_elems = self.num_elems.load(core::sync::atomic::Ordering::Relaxed);
 
-        if l == 0 {
+        if num_elems == 0 {
             return false;
         }
         
@@ -83,6 +86,7 @@ impl<'a, T: Default, const S: usize> SlotMap<'a, T, S> {
         match found_idx {
             Some(idx) => {
                 self.slots.lock()[idx] = None;
+                self.num_elems.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
                 true
             },
             None => false,
@@ -96,9 +100,9 @@ impl<'a, T: Default, const S: usize> SlotMap<'a, T, S> {
     /// this is unsafe if the data is still in use
     pub unsafe fn clear_slot(&self, name: &str) -> bool {
 
-        let l = self.slots.lock().len();
+        let num_elems = self.num_elems.load(core::sync::atomic::Ordering::Relaxed);
 
-        if l == 0 {
+        if num_elems == 0 {
             return false;
         }
         
@@ -111,6 +115,7 @@ impl<'a, T: Default, const S: usize> SlotMap<'a, T, S> {
                     ptr.write(T::default());
                 }
                 self.slots.lock()[idx] = None;
+                self.num_elems.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
                 true
             },
             None => false,
@@ -125,6 +130,7 @@ impl<'a, T: Default, const S: usize> SlotMap<'a, T, S> {
             slot_ref,
         };
         self.slots.lock()[idx] = Some(slot);
+        self.num_elems.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         Some(slot_ref)
     }
 }
