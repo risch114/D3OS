@@ -8,7 +8,6 @@
 */
 
 pub mod sys_naming;
-pub mod sys_terminal;
 pub mod sys_concurrent;
 pub mod sys_net;
 pub mod sys_time;
@@ -18,6 +17,7 @@ pub mod sys_input;
 pub mod sys_system_info;
 pub mod sys_logger;
 pub mod sys_shm;
+pub mod sys_ipc;
 
 
 pub mod syscall_dispatcher;

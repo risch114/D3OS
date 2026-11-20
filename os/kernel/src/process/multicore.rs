@@ -50,6 +50,20 @@ impl Scheduler {
                     inc_rq_len();
                 }
             }
+            // If the thread is locally sleeping, requeue it.
+            MessageCmd::Unsleep { pid, tid } => {
+                if scheduler::is_thread_alive(tid) == false { return; }
+                let mut sleep_list = self.sleep_list.lock();
+
+                if let Some(pos) = sleep_list
+                    .iter().position(|(t, _ms)| t.id() == tid && t.process().id() == pid)
+                {
+                    let thread = sleep_list.swap_remove(pos).0;
+                    thread.set_state(ThreadState::Running);
+                    state.ready_queue.push_front(thread);
+                    inc_rq_len();
+                }
+            }
             // if you have this thread, kill it
             MessageCmd::Kill { tid } => {
                 if scheduler::is_thread_alive(tid) == false { return; }
@@ -114,6 +128,8 @@ pub enum MessageCmd {
 
     /// "If you have this thread in your local blocked list, wake it."
     Unblock { pid: Uuid, tid: usize },
+
+    Unsleep { pid: Uuid, tid: usize },
 
     /// "If you have this thread, kill it."
     Kill { tid: usize },

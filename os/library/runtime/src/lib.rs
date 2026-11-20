@@ -31,11 +31,14 @@ pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     println!("Panic: {}!", info);
-    thread::exit();
+    process::exit();
 }
 
 #[unsafe(no_mangle)]
 extern "sysv64" fn entry() {
+    syscall(SystemCall::MapMemory, &[env::USER_SPACE_MAILBOX_START, env::USER_SPACE_MAILBOX_SIZE])
+        .expect("Could not create user mailbox.");
+
     syscall(SystemCall::MapMemory, &[env::HEAP_START, env::HEAP_SIZE])
         .expect("Could not create user heap.");
 

@@ -2,23 +2,27 @@
 edition = "2024"
 name = "terminal"
 version = "0.1.0"
-authors = ["Michael Schöttner <michael.schoettner@hhu.de>, Fabian Ruhland <ruhland@hhu.de>"]
-
+authors = ["Aymen Sellami <aymen.sellami@hhu.de>", "Sebastian Keller <sebastian.keller@hhu.de>", "Fabian Ruhland <ruhland@hhu.de>", "Niklas Sombert <niklas.sombert@uni-duesseldorf.de>", "Michael Schöttner <michael.schoettner@hhu.de>",]
 [lib]
 test = false
 doctest = false
 bench = false
 
 [features]
-default = ["userspace"]
-userspace = ["dep:syscall", "dep:stream", "dep:spin", "dep:pc-keyboard"]
+default = []
+manager = ["dep:concurrent"]
 
 [dependencies]
 # Local dependencies
-syscall = { path = "../syscall", optional = true }
-stream = { path = "../stream", optional = true }
+bootstrap_env = { path = "../bootstrap_env" }
+syscall = { path = "../syscall" }
+stream = { path = "../stream" }
+logger = { path = "../logger" }
+naming = { path = "../naming" }
+concurrent = { path = "../concurrent", optional = true }
 
 # External dependencies
-spin = { version = "0.12", optional = true }
+spin = "0.12"
 num_enum = { version = "0.7", default-features = false }
-pc-keyboard = { version = "0.9", default-features = false, optional = true }
+pc-keyboard = { version = "0.9", default-features = false }
+log = "0.4"

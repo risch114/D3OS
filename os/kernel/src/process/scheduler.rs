@@ -42,7 +42,7 @@ use core::cell::Cell;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::sync::atomic::AtomicU32;
-use log::info;
+use log::{debug, info};
 use smallmap::Map;
 use spin::{Mutex, MutexGuard, Once};
 use crate::device::cpu::{disable_int_nested, enable_int_nested};
@@ -54,28 +54,34 @@ static ACTIVE_CPUS: AtomicU32 = AtomicU32::new(1);  // BP automatically
 
 /// Global set of "alive" thread IDs (across all cores).
 /// Presence means: joining on this tid should block (unless it exits concurrently).
-static ACTIVE_TIDS: Once<Mutex<Map<usize, ()>>> = Once::new();
+static ACTIVE_TIDS: Once<Mutex<Vec<(Uuid, usize)>>> = Once::new();
 
 #[inline]
-pub fn active_tids() -> &'static Mutex<Map<usize, ()>> {
-    ACTIVE_TIDS.call_once(|| Mutex::new(Map::new()))
+pub fn active_tids() -> &'static Mutex<Vec<(Uuid, usize)>> {
+    ACTIVE_TIDS.call_once(|| Mutex::new(Vec::new()))
+}
+
+pub fn active_threads_for_process(process_id: &Uuid) -> Vec<usize> {
+    active_tids().lock().iter().filter(|(pid, _)| *pid == *process_id).map(|(_, tid)| *tid).collect()
 }
 
 #[inline]
-fn mark_thread_alive(tid: usize) {
-    let mut set = active_tids().lock();
-    set.insert(tid, ());
+fn mark_thread_alive(pid: Uuid, tid: usize) {
+    active_tids().lock().push((pid, tid));
 }
 
 #[inline]
 fn mark_thread_dead(tid: usize) {
-    let mut set = active_tids().lock();
-    set.remove(&tid);
+    let mut tids = active_tids().lock();
+    let pos = tids.iter().position(|t| t.1 == tid);
+    if let Some(p) = pos {
+        tids.remove(p);
+    }
 }
 
 #[inline]
 pub fn is_thread_alive(tid: usize) -> bool {
-    active_tids().lock().contains_key(&tid)
+    active_tids().lock().iter().any(|t| t.1 == tid)
 }
 
 #[inline]
@@ -171,7 +177,7 @@ impl Scheduler {
 
     /// Get all active thread IDs
     pub fn active_thread_ids(&self) -> Vec<usize> {
-        Vec::from_iter(active_tids().lock().iter().cloned().map(|t | t.0))
+        Vec::from_iter(active_tids().lock().iter().cloned().map(|t | t.1))
     }
 
     /// Return the current running thread \
@@ -213,6 +219,18 @@ impl Scheduler {
             .iter()
             .find(|thread| thread.id() == thread_id)
             .cloned()
+    }
+
+    /// Return the id of the process that owns the current thread.
+    ///
+    /// Uses `try_current_thread` because the naming service is initialized at boot
+    /// before the scheduler has a current thread. `Uuid::nil()` is the kernel
+    /// process id (see `Process::new_kernel`), so kernel- and boot-time opens are
+    /// owned by the kernel process, which never exits and is never reclaimed.
+    pub fn current_pid(&self) -> Uuid {
+        self.try_current_thread()
+            .map(|thread| thread.process().id())
+            .unwrap_or_else(Uuid::nil)
     }
 
     /// Return (pid, tid) of current thread
@@ -312,8 +330,8 @@ impl Scheduler {
 
     /// Insert `thread` into the ready queue of the scheduler
     pub fn ready(&self, thread: Arc<Thread>) {
-        let id = thread.id();
-        mark_thread_alive(id);
+        let tid = thread.id();
+        mark_thread_alive(thread.process().id(), tid);
 
         // If we get the lock on 'self.state' but not on 'self.join_map' the system hangs.
         // The scheduler is not able to switch threads anymore, because of 'self.state' is locked,
@@ -332,8 +350,8 @@ impl Scheduler {
         state.ready_queue.push_front(thread);
 
         // Don't override value if key present
-        if !join_map.contains_key(&id){
-            join_map.insert(id, Vec::new());
+        if !join_map.contains_key(&tid){
+            join_map.insert(tid, Vec::new());
         }
     }
 
@@ -458,6 +476,8 @@ impl Scheduler {
         let current = self.current_thread();
         current.set_state(ThreadState::Exited);
 
+        debug!("Exiting thread [{}]", current.id());
+
         // Mark dead globally *before* waking joiners, so joiners racing in will observe "dead"
         mark_thread_dead(current.id());
         self.unjoin(current.id(), &mut ready_state);
@@ -466,6 +486,23 @@ impl Scheduler {
         drop(current); // Decrease Rc manually, because block() does not return
         self.block_and_switch(ready_state);
         unreachable!()
+    }
+
+    /// If the current thread was asked to die, exit on this stack so syscall
+    /// locks are released first. A killed thread is exactly a cooperative
+    /// `ThreadExit`; process-level teardown (if this is the process's last
+    /// thread) happens inside `exit`. Never returns when killed.
+    pub fn exit_if_killed(&self) {
+        // check if current thread exists
+        let Some(thread) = self.try_current_thread() else {
+            return;
+        };
+        // check if current thread kill was requested
+        if !thread.is_kill_requested() {
+            return;
+        }
+        drop(thread);
+        self.exit();
     }
 
     /// Kill the thread with the id `thread_id`, if it is on the same Core
@@ -485,55 +522,67 @@ impl Scheduler {
     /// Kill the thread with the id `thread_id`, if it is on the same Core
     /// goes through ready_queue, sleep_list, blocked_list, and join_map in this order
     /// returns true if a thread with the given id was found
-    pub(super) fn kill_locally(&self, thread_id: usize, state: &mut ReadyState) -> bool {
-        if is_thread_alive(thread_id) == false { return true; }
-        let mut changed = false;
+    pub(super) fn kill_locally(&self, thread_id: usize, ready_state: &mut ReadyState) -> bool {
 
-        // check ready_queue
-        let mut before = state.ready_queue.len();
-        state.ready_queue.retain(|thread| thread.id() != thread_id);
-        let mut after = state.ready_queue.len();
-        if before != after {
-            changed = true;
-        }
-        if !changed {
-            {   // check sleep_list
+        if is_thread_alive(thread_id) == false { return true; }
+
+        let current_thread = scheduler().current_thread();
+        
+        
+        #[derive(Debug, PartialEq)]
+        enum Where { Current, ReadyQueue, SleepList, BlockList, JoinMap }
+        
+        let found = 'find_thread: {
+            // Check if the current thread is the target thread
+            if thread_id == current_thread.id() {
+                break 'find_thread Some((current_thread, Where::Current));
+            }
+            // check ready_queue
+            if let Some(pos) = ready_state.ready_queue.iter().position(|thread| thread.id() == thread_id) {
+                break 'find_thread Some((ready_state.ready_queue.remove(pos).unwrap(), Where::ReadyQueue));
+            }
+            {  // check sleep list
                 let mut sleep_list = self.sleep_list.lock();
-                before = sleep_list.len();
-                sleep_list.retain(|(thread, _)| thread.id() != thread_id);
-                after = state.ready_queue.len() + sleep_list.len();
-            }
-            if before != after {
-                changed = true;
-            }
-            if!changed {
-                {   // check Block List
-                    let mut blocked_list = self.blocked_list.lock();
-                    let before = blocked_list.len();
-                    blocked_list.retain(|t| t.id() != thread_id);
-                    if blocked_list.len() != before {
-                        changed = true;
-                    }
+                if let Some(pos) = sleep_list.iter().position(|(thread, _)| thread.id() == thread_id) {
+                    break 'find_thread Some(((sleep_list.remove(pos).0), Where::SleepList));
                 }
-                if !changed {
-                    // check all join_map's
-                    let mut join_map = self.join_map.lock();
-                    for (_target, wait_list) in join_map.iter_mut() {
-                        let before = wait_list.len();
-                        wait_list.retain(|t| t.id() != thread_id);
-                        if wait_list.len() != before {
-                            changed = true;
-                        }
+            }
+            {  // check block list
+                let mut block_list = self.blocked_list.lock();
+                if let Some(pos) = block_list.iter().position(|thread| thread.id() == thread_id) {
+                    break 'find_thread Some(((block_list.remove(pos)), Where::BlockList));
+                }
+            }
+            {  // check join map
+                let mut join_map = self.join_map.lock();
+                for (_, wait_list) in join_map.iter_mut() {
+                    if let Some(pos) = wait_list.iter().position(|thread| thread.id() == thread_id) {
+                        // return here, or could a thread join on multiple?
+                        break 'find_thread Some(((wait_list.remove(pos)), Where::JoinMap));
                     }
                 }
             }
+            None
+        };
+
+        if let Some((thread, found_where)) = found {
+            
+            debug!("Requesting kill for thread [{}], found on CPU {} in {:?}", thread_id, current_core_id(), found_where);
+
+            thread.request_kill();
+
+            match found_where {
+                Where::SleepList | Where::BlockList | Where::JoinMap => {
+                    ready_state.ready_queue.push_front(thread);
+                    multicore::inc_rq_len();
+                },
+                _ => {},
+            }
+
+            true
+        } else {
+            false
         }
-        if changed {
-            mark_thread_dead(thread_id);
-            self.unjoin(thread_id, state);
-            multicore::dec_rq_len();
-        }
-        changed
     }
 
     /// Switch from current to next thread (from ready queue). \
@@ -671,6 +720,45 @@ impl Scheduler {
                 true
             }
         });
+    }
+
+    /// Unsleep, i.e. prematurely wake up thread with given (pid, tid). \
+    /// Returns true if thread was sleeping, and successfully unslept.
+    pub fn unsleep(&self, pid: Uuid, tid: usize) -> bool {
+        
+        let mut state = self.get_ready_state();
+        
+        // 1. check sleep list
+        let mut sleep_list = self.sleep_list.lock();
+        if let Some(pos) = sleep_list.iter().position(|(t, _ms)| t.id() == tid && t.process().id() == pid) {
+            let thread = sleep_list.swap_remove(pos).0;
+            thread.set_state(ThreadState::Ready);
+            state.ready_queue.push_front(Arc::clone(&thread));
+            multicore::inc_rq_len();
+            return true;
+        }
+
+        // 2. check if thread isn't sleeping at all
+        // 2a. check current thread
+        let curr_thread = self.current_thread();
+        if curr_thread.id() == tid && curr_thread.process().id() == pid {
+            return false;
+        }
+
+        // 2b. check ready_queue
+        if state.ready_queue.iter().any(|t| t.id() == tid && t.process().id() == pid) {
+            // Already runnable (e.g. a previous wakeup raced in); nothing to do
+            return false;
+        }
+
+        // 3. thread isn't on this core; send message to the other cores
+        if is_thread_alive(tid) {
+            drop(state); // release ready_state before cross-core scheduling
+            multicore::schedule_on_all_others(MessageItem::Cmd(MessageCmd::Unsleep { pid, tid }));
+            return true;
+        }
+
+        false
     }
 
     /// Put calling thread to block

@@ -14,10 +14,13 @@ use x86_64::structures::gdt::SegmentSelector;
 use x86_64::{PrivilegeLevel, VirtAddr};
 
 use crate::process::core_local_storage::init_tss_cls;
+use crate::syscall::sys_concurrent::sys_thread_block;
+use crate::syscall::sys_ipc::{sys_ipc_receive_blocking, sys_ipc_register, sys_ipc_delete, sys_ipc_send};
 use log::info;
 use x86_64::registers::rflags::RFlags;
 
 use super::sys_concurrent::{
+    check_killed_on_syscall_return,
     sys_process_count, sys_process_execute_binary, sys_process_exit,
     sys_process_id, sys_thread_count, sys_process_status, 
     sys_thread_create, sys_thread_exit, sys_thread_id, sys_thread_join, 
@@ -36,11 +39,6 @@ use super::sys_net::{
     sys_sock_can_recv, sys_sock_can_send
 };
 use super::sys_system_info::sys_map_build_info;
-use super::sys_terminal::{
-    sys_terminal_check_input_state, sys_terminal_read_input,
-    sys_terminal_read_output, sys_terminal_write_input,
-    sys_terminal_write_output,
-};
 use super::sys_time::{sys_get_date, sys_get_system_time, sys_set_date};
 use super::sys_vmem::{sys_map_memory, sys_map_frame_buffer};
 use super::sys_shm::{sys_shm_attach, sys_shm_detach, sys_shm_open, sys_shm_unlink};
@@ -92,11 +90,6 @@ impl SyscallTable {
     pub const fn new() -> Self {
         SyscallTable {
             handle: [
-                sys_terminal_read_input as *const _,
-                sys_terminal_write_input as *const _,
-                sys_terminal_check_input_state as *const _,
-                sys_terminal_write_output as *const _,
-                sys_terminal_read_output as *const _,
                 sys_map_memory as *const _,
                 sys_map_frame_buffer as *const _,
                 sys_process_execute_binary as *const _,
@@ -108,6 +101,7 @@ impl SyscallTable {
                 sys_thread_id as *const _,
                 sys_thread_switch as *const _,
                 sys_thread_sleep as *const _,
+                sys_thread_block as *const _,
                 sys_thread_join as *const _,
                 sys_thread_exit as *const _,
                 sys_thread_kill as *const _,
@@ -147,6 +141,10 @@ impl SyscallTable {
                 sys_shm_attach as *const _,
                 sys_shm_detach as *const _,
                 sys_shm_unlink as *const _,
+                sys_ipc_register as *const _,
+                sys_ipc_send as *const _,
+                sys_ipc_receive_blocking as *const _,
+                sys_ipc_delete as *const _,
             ],
         }
     }
@@ -198,6 +196,12 @@ unsafe extern "sysv64" fn syscall_handler() {
 
     // Call system call handler, corresponding to ID (in rax)
     "call [{SYSCALL_TABLE} + 8 * rax]",
+    // Cooperative kill: finish the syscall (locks dropped) then exit if asked.
+    "push rax",
+    "push rdx",
+    "call {CHECK_KILLED}",
+    "pop rdx",
+    "pop rax",
 
     // Restore registers
     "pop r11", // Pop the alignment 0
@@ -221,7 +225,8 @@ unsafe extern "sysv64" fn syscall_handler() {
     NUM_SYSCALLS = const NUM_SYSCALLS,
     CORE_LOCAL_STORAGE_TSS_RSP0_PTR_INDEX = const CORE_LOCAL_STORAGE_TSS_RSP0_PTR_INDEX,
     CORE_LOCAL_STORAGE_USER_RSP_INDEX = const CORE_LOCAL_STORAGE_USER_RSP_INDEX,
-    SYSCALL_TABLE = sym SYSCALL_TABLE
+    SYSCALL_TABLE = sym SYSCALL_TABLE,
+    CHECK_KILLED = sym check_killed_on_syscall_return
     );
 }
 
